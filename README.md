@@ -1,31 +1,20 @@
-# EDA Flow Engineering Practice
+# GitHub Backend Flow Articles 01-11
 
-Engineering notes on reproducible EDA flows, Tcl automation, runtime environments, logging systems, command streams, and APR-oriented flow infrastructure.
+Author: Darren H. Chen
 
-## Series
+This package contains the updated GitHub Markdown versions of Backend Flow Engineering articles 01-11.
 
-### EDA Flow Engineering Practice
+| No. | Article | File |
+|---:|---|---|
+| 01 | Why the First Step Is Not Design Import, but a Reproducible Runtime Environment | [LAY-BE-01_reproducible_environment.md](../articles/LAY-BE-01_reproducible_environment.md) |
+| 02 | Backend Tool Startup as a Session State Space | [LAY-BE-02_session_state_space.md](./LAY-BE-02_session_state_space.md) |
+| 03 | Why Tcl Is the Control Interface of Backend Flow | [LAY-BE-03_tcl_control_interface.md](./LAY-BE-03_tcl_control_interface.md) |
+| 04 | From log to cmd_log: How to Preserve a Replayable Engineering Session | [LAY-BE-04_log_cmdlog_replay.md](./LAY-BE-04_log_cmdlog_replay.md) |
+| 05 | Why Backend Tcl Scripts Must Be Checked Before Execution | [LAY-BE-05_tcl_script_precheck.md](./LAY-BE-05_tcl_script_precheck.md) |
+| 06 | Why a Mature Backend Flow Needs a Command Help Baseline | [LAY-BE-06_command_help_baseline.md](./LAY-BE-06_command_help_baseline.md) |
+| 07 | How Project Library Manages Technology and Standard Cell Context | [LAY-BE-07_project_library.md](./LAY-BE-07_project_library.md) |
+| 08 | Why LEF, Liberty, Verilog, and DEF Must Work Together | [LAY-BE-08_standard_formats.md](./LAY-BE-08_standard_formats.md) |
+| 09 | Design Import Is Not File Reading: It Builds the First Semantic Layer of the Design Database | [LAY-BE-09_design_import.md](./LAY-BE-09_design_import.md) |
+| 10 | From Import to Link: Why link_project Determines Whether the Tool Understands the Design | [LAY-BE-10_import_link_current_design.md](./LAY-BE-10_import_link_current_design.md) |
+| 11 | Why cell, net, pin, and port Are the Basic Units of Backend Flow Engineering | [LAY-BE-11_design_object_model.md](./LAY-BE-11_design_object_model.md) |
 
-1. [Why the Real First Step of an EDA Tool Is Not Design Import, but a Reproducible Runtime Environment](articles/01-reproducible-runtime-environment.md)
-2. [The State Space Behind an EDA Tool Session: Paths, Initialization, Logs, and Command Streams](articles/02-session-state-space.md)
-
-## Core Ideas
-
-- A tool run is not only a command.
-- An EDA session is determined by executable path, working directory, HOME, environment variables, initialization files, command streams, logs, and temporary directories.
-- Reproducible EDA flows require explicit paths, explicit initialization, explicit logs, and explicit command streams.
-
-## Planned Topics
-
-- Tcl as the glue language of EDA automation
-- log / cmd_log / sum_log and replayable engineering sessions
-- project-level initialization structure
-- design import preparation
-- library setup
-- APR flow scripting
-- timing and physical implementation flow automation
-
-## Author
-
-Darren H. Chen  
-EDA software engineering / flow automation / verification infrastructure
