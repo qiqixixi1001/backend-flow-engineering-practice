@@ -1,4 +1,4 @@
-# Backend Flow Engineering 01: Why the First Step Is Not Design Import, but a Reproducible Runtime Environment
+# 01. Why the First Step Is Not Design Import, but a Reproducible Runtime Environment
 
 > Author: Darren H. Chen  
 > Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
@@ -9,14 +9,11 @@ A backend flow can fail before the first design file is read. The failure may no
 
 For that reason, the first engineering problem is not how to import a netlist. It is how to create a controlled runtime environment. A controlled environment gives every later stage a stable base: tool path, working directory, environment variables, startup behavior, log path, command trace, summary file, temporary storage, and exit status. Without this base, later results cannot be trusted, even if the tool reports success.
 
-This article is written as a long-form engineering article rather than a short README note. The goal is not to list a few steps, but to explain the engineering model behind the stage: what problem the stage solves, what internal state it creates or verifies, what report evidence should be produced, and how a small demo can be designed so that the result is inspectable.
-
 A backend flow is not only a command sequence. It is a state transition system. Each stage starts from an input state, applies a controlled operation, and leaves an output state for the next stage. The quality of the whole flow depends on whether these state transitions are explicit, observable, and reviewable.
-
 
 ## 1. Conceptual Model
 
-The runtime environment should be treated as the first design object of the flow. It is not part of the chip database, but it determines how the chip database will be created. A backend tool reads more than the explicit Tcl script. It also sees the shell environment, license variables, home directory, local startup files, project configuration files, relative paths, standard output redirection, and sometimes graphical settings.
+The runtime environment should be treated as the first design object of the flow. It is not part of the chip database, but it determines how the chip database will be created. A EDA tool reads more than the explicit Tcl script. It also sees the shell environment, license variables, home directory, local startup files, project configuration files, relative paths, standard output redirection, and sometimes graphical settings.
 
 A reproducible environment converts these hidden inputs into visible inputs. The goal is to make a run explainable without relying on memory. A reviewer should be able to inspect the run directory and answer: which executable was used, from which directory, with which script, which logs, and which temporary area.
 
@@ -26,7 +23,7 @@ A useful way to reason about the stage is:
 inputs + assumptions
         |
         v
-controlled backend tool operation
+controlled EDA tool operation
         |
         v
 observable state + reports + next-stage readiness
@@ -34,10 +31,9 @@ observable state + reports + next-stage readiness
 
 This model prevents a common mistake: judging a backend stage only by whether a command returned without a fatal error. A clean return is useful, but it is not sufficient. The stage must also leave enough evidence to prove that the expected state was created.
 
-
 ## 2. Backend Architecture View
 
-The architecture of a reproducible runtime can be divided into five layers: launcher, environment, project configuration, command stream, and evidence outputs. The launcher defines how the backend tool is invoked. The environment layer fixes the shell and license context. The project configuration layer defines paths and stage variables. The command stream is the Tcl entry point. The evidence outputs are logs, command records, summaries, reports, and exit markers.
+The architecture of a reproducible runtime can be divided into five layers: launcher, environment, project configuration, command stream, and evidence outputs. The launcher defines how the EDA tool is invoked. The environment layer fixes the shell and license context. The project configuration layer defines paths and stage variables. The command stream is the Tcl entry point. The evidence outputs are logs, command records, summaries, reports, and exit markers.
 
 A generic architecture view is:
 
@@ -59,7 +55,6 @@ A generic architecture view is:
 
 The important engineering principle is separation of responsibility. The launcher should not hide design assumptions. The configuration layer should not silently change database state. The stage engine should not be treated as a black box without reports. The report layer should not rely only on human memory.
 
-
 ## 3. Engineering Methodology
 
 The recommended methodology is to move from visibility to control. Visibility means the flow can show its inputs, state, actions, and outputs. Control means the flow can reject unsafe conditions before they damage the run state. In backend engineering, visibility without control creates long logs but weak reliability. Control without visibility creates rigid scripts that are difficult to debug. A mature flow needs both.
@@ -74,7 +69,6 @@ The precheck phase validates assumptions. The execution phase performs the inten
 
 This methodology is intentionally conservative. Backend stages are highly coupled. A weak assumption in an early stage can become a timing, routing, physical verification, or ECO problem much later. The earlier the flow records and checks state, the cheaper debugging becomes.
 
-
 For this article, the most important working rules are:
 
 ```text
@@ -86,7 +80,6 @@ For this article, the most important working rules are:
 ```
 
 This is also the reason each demo in this series is designed to be independent. A demo should carry its own configuration, scripts, sample data where needed, logs, reports, temporary directory, and README files. Independence makes the example easier to review and prevents one demo from silently depending on the side effects of another.
-
 
 ## 4. Data Model and Object Relationships
 
@@ -101,7 +94,6 @@ Which state did this stage promise to create, and which report proves that it wa
 ```
 
 When this question cannot be answered, the flow is not yet engineered. It may still run, but it is not ready to be used as a repeatable technical asset.
-
 
 ## 5. Demo Design
 
@@ -139,7 +131,6 @@ The demo should produce at least three categories of evidence:
 3. Review evidence: what report should be inspected before moving on.
 ```
 
-
 ## 6. What to Check in Reports
 
 For this stage, the report checklist should include:
@@ -154,7 +145,6 @@ The strongest reports are compact and explicit. They should be short enough to r
 
 A good report also distinguishes between missing inputs, unsupported commands, empty object collections, and real design errors. These cases require different debugging actions.
 
-
 ## 7. Common Pitfalls
 
 Common pitfalls include:
@@ -166,7 +156,6 @@ Common pitfalls include:
 - Writing temporary files into a shared directory where another run can overwrite them.
 
 The deeper issue behind these pitfalls is state ambiguity. Backend problems become expensive when the engineer cannot tell whether the failure came from the design, the library, the tool context, the command interface, or the run environment. The purpose of the demo is to reduce that ambiguity.
-
 
 ## 8. Engineering Takeaways
 
@@ -182,7 +171,6 @@ Review the evidence before moving forward.
 ```
 
 This is the difference between a command sequence and a backend flow engineering practice. The former may work once. The latter can be reviewed, repeated, compared, debugged, and reused.
-
 
 ## Architecture Deep Dive: What the Stage Really Owns
 
@@ -244,7 +232,6 @@ A reviewer should also ask:
 ```
 
 These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
-
 
 ## Additional Note: Reproducibility Is a Data Problem
 
