@@ -1,238 +1,792 @@
-# 01. Why the First Step Is Not Design Import, but a Reproducible Runtime Environment
+# 01. Why the First Step in Backend Flow Is a Reproducible Runtime Environment
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-01_reproducible_environment**  
-> Tags: Backend Flow, EDA, Runtime Environment, Reproducibility, Tcl, Logs, Flow Engineering
+Author: Darren H. Chen
 
-A backend flow can fail before the first design file is read. The failure may not look like a design failure. It may look like a missing log, a different working directory, an unexpected startup file, a hidden user setting, or a temporary directory shared by several runs. These problems are easy to ignore in a small experiment, but they become serious when the flow must be reviewed, repeated, compared, or handed to another engineer.
+Demo: `LAY-BE-01_reproducible_environment`
 
-For that reason, the first engineering problem is not how to import a netlist. It is how to create a controlled runtime environment. A controlled environment gives every later stage a stable base: tool path, working directory, environment variables, startup behavior, log path, command trace, summary file, temporary storage, and exit status. Without this base, later results cannot be trusted, even if the tool reports success.
+Tags: `Backend Flow` `EDA` `APR` `Tcl` `Runtime Environment` `Reproducibility` `Engineering Flow`
 
-A backend flow is not only a command sequence. It is a state transition system. Each stage starts from an input state, applies a controlled operation, and leaves an output state for the next stage. The quality of the whole flow depends on whether these state transitions are explicit, observable, and reviewable.
+In many backend implementation projects, the first visible technical action is usually design import. A typical engineer may start by reading the gate-level netlist, loading Liberty timing libraries, importing LEF technology and cell abstracts, applying SDC constraints, and then moving toward floorplan, placement, clock tree synthesis, routing, and signoff handoff.
 
-## 1. Conceptual Model
+That sequence is correct at the design-data level. However, it is not the first step at the engineering-flow level.
 
-The runtime environment should be treated as the first design object of the flow. It is not part of the chip database, but it determines how the chip database will be created. A EDA tool reads more than the explicit Tcl script. It also sees the shell environment, license variables, home directory, local startup files, project configuration files, relative paths, standard output redirection, and sometimes graphical settings.
+Before an EDA tool can safely read a design, the run itself must be reproducible. The tool session must have a controlled executable path, a controlled working directory, a controlled initialization model, a controlled Tcl entry point, a controlled log system, a controlled temporary directory, and a controlled way to capture what actually happened during the run.
 
-A reproducible environment converts these hidden inputs into visible inputs. The goal is to make a run explainable without relying on memory. A reviewer should be able to inspect the run directory and answer: which executable was used, from which directory, with which script, which logs, and which temporary area.
+A backend flow that can run once is not yet an engineering flow. A backend flow becomes an engineering flow only when another user, another server, another run directory, or a future debug session can reconstruct the same runtime context and understand how the tool moved from startup to output.
 
-A useful way to reason about the stage is:
+This article explains the runtime environment as the first design object of backend flow engineering.
 
-```text
-inputs + assumptions
-        |
-        v
-controlled EDA tool operation
-        |
-        v
-observable state + reports + next-stage readiness
-```
+---
 
-This model prevents a common mistake: judging a backend stage only by whether a command returned without a fatal error. A clean return is useful, but it is not sufficient. The stage must also leave enough evidence to prove that the expected state was created.
+## 1. Backend Flow Starts Before Design Import
 
-## 2. Backend Architecture View
-
-The architecture of a reproducible runtime can be divided into five layers: launcher, environment, project configuration, command stream, and evidence outputs. The launcher defines how the EDA tool is invoked. The environment layer fixes the shell and license context. The project configuration layer defines paths and stage variables. The command stream is the Tcl entry point. The evidence outputs are logs, command records, summaries, reports, and exit markers.
-
-A generic architecture view is:
+A physical implementation flow is often described as a sequence of design stages:
 
 ```text
-[launcher / Tcl entry]
-        |
-        v
-[configuration and precheck layer]
-        |
-        v
-[backend database or runtime context]
-        |
-        v
-[stage-specific engine]
-        |
-        v
-[reports, logs, and state checks]
+netlist import
+library setup
+floorplan
+power plan
+placement
+timing analysis
+clock tree synthesis
+routing
+physical verification handoff
+ECO
+final export
 ```
 
-The important engineering principle is separation of responsibility. The launcher should not hide design assumptions. The configuration layer should not silently change database state. The stage engine should not be treated as a black box without reports. The report layer should not rely only on human memory.
-
-## 3. Engineering Methodology
-
-The recommended methodology is to move from visibility to control. Visibility means the flow can show its inputs, state, actions, and outputs. Control means the flow can reject unsafe conditions before they damage the run state. In backend engineering, visibility without control creates long logs but weak reliability. Control without visibility creates rigid scripts that are difficult to debug. A mature flow needs both.
-
-The practical sequence is:
+This is useful, but it hides an earlier layer:
 
 ```text
-precheck -> execute stage -> query state -> write reports -> review gate -> next stage
+tool executable
+shell environment
+license environment
+working directory
+startup files
+project configuration
+Tcl command stream
+log files
+temporary files
+exit status
+run summary
 ```
 
-The precheck phase validates assumptions. The execution phase performs the intended state transition. The query phase inspects the database or runtime state. The report phase converts internal state into durable evidence. The review gate decides whether the next stage is allowed to proceed.
+The second layer determines whether the first layer can be trusted.
 
-This methodology is intentionally conservative. Backend stages are highly coupled. A weak assumption in an early stage can become a timing, routing, physical verification, or ECO problem much later. The earlier the flow records and checks state, the cheaper debugging becomes.
+When two engineers run the same Tcl script and get different results, the difference often comes from runtime context rather than design intent. The script may look identical, but the session may not be identical.
 
-For this article, the most important working rules are:
+A backend run is affected by many forms of hidden state:
+
+| Runtime factor | Why it matters |
+|---|---|
+| Tool executable | Different releases may parse files, set defaults, or report violations differently. |
+| Environment variables | Library paths, license settings, locale, temporary locations, and tool search paths may change behavior. |
+| Working directory | Relative paths, output paths, and generated files depend on the run location. |
+| User home configuration | Personal startup files may inject aliases, parameters, or display settings. |
+| Project initialization | Library setup, design variables, report paths, and run switches must be project-owned. |
+| Tcl entry point | The tool must receive a clear command stream rather than an informal interactive history. |
+| Logs and summaries | Debugging requires durable evidence, not memory. |
+| Temporary directory | Old temporary data can pollute a new run if the directory is not isolated. |
+
+A design import command executed inside an uncontrolled session is not a clean design import. It is a design import under unknown assumptions.
+
+---
+
+## 2. Runtime Environment as a State Space
+
+A backend tool session can be modeled as a state space. The session does not begin with an empty mathematical state. It begins with a shell process, inherited environment variables, a current directory, possible startup files, command-line flags, and internal default settings.
+
+The first goal of a reproducible environment is to make this state space explicit.
+
+```mermaid
+flowchart LR
+    subgraph Shell[Shell Process]
+        A1[PATH]
+        A2[license variables]
+        A3[HOME]
+        A4[current directory]
+    end
+
+    subgraph Launch[Tool Launch]
+        B1[tool binary]
+        B2[launch options]
+        B3[working directory]
+        B4[tmp directory]
+    end
+
+    subgraph Init[Initialization Layer]
+        C1[user startup files]
+        C2[project init Tcl]
+        C3[run options]
+        C4[library setup hooks]
+    end
+
+    subgraph Runtime[Tool Runtime]
+        D1[Tcl interpreter]
+        D2[design database]
+        D3[parameters]
+        D4[object model]
+    end
+
+    subgraph Evidence[Evidence Artifacts]
+        E1[main log]
+        E2[command log]
+        E3[summary log]
+        E4[stdout and stderr]
+        E5[run manifest]
+    end
+
+    Shell --> Launch --> Init --> Runtime --> Evidence
+```
+
+From this view, a backend flow is not only a sequence of commands. It is a sequence of state transitions.
+
+A command such as `import_verilog`, `read_sdc`, `init_floorplan`, or `place_opt` does not operate in isolation. It operates against the current state of the tool session. That state includes loaded libraries, active design context, timing scenarios, unit settings, parameter values, search paths, and previous commands.
+
+Therefore, reproducibility requires two levels of control:
+
+1. **Input-state control**: the session must start from a known context.
+2. **Transition control**: each command must be recorded and reviewed as a state-changing operation.
+
+Without input-state control, the same command stream may begin from different conditions.
+
+Without transition control, the engineer may not know what was actually executed.
+
+---
+
+## 3. The Minimal Runtime Contract
+
+A reproducible backend runtime environment should define a runtime contract. The contract is not tied to any particular commercial tool. It describes the engineering guarantees expected from the run wrapper and project layout.
+
+| Contract item | Engineering requirement |
+|---|---|
+| Tool identity | The exact backend tool entry point is known. |
+| Working directory | The tool starts in a defined project or run directory. |
+| Project configuration | The project initialization file is explicitly loaded. |
+| Tcl command stream | The command stream is provided by a known file or standard input. |
+| Main log | The tool log is preserved in a deterministic location. |
+| Command log | The executed command trace is preserved when supported. |
+| Summary log | A compact stage-level summary is generated. |
+| Standard output/error | Shell-level output is captured. |
+| Temporary directory | Temporary files are isolated per run. |
+| Exit status | The wrapper returns a meaningful status to the caller. |
+| Run manifest | The run records key paths, settings, and artifacts. |
+
+The purpose of this contract is not to make the first demo complex. The purpose is to make every later demo trustworthy.
+
+If the first runtime layer is loose, later stages become difficult to compare:
 
 ```text
-1. Make hidden assumptions visible.
-2. Convert every critical state into a reportable fact.
-3. Separate setup, execution, query, and review.
-4. Treat warnings as engineering signals, not background noise.
-5. Keep the demo small enough to understand and strict enough to be useful.
+Was the placement result changed by the placement script?
+Was it changed by a different tool version?
+Was it changed by a different startup file?
+Was it changed by a hidden parameter?
+Was it changed by a stale temporary database?
+Was it changed by a different search path?
 ```
 
-This is also the reason each demo in this series is designed to be independent. A demo should carry its own configuration, scripts, sample data where needed, logs, reports, temporary directory, and README files. Independence makes the example easier to review and prevents one demo from silently depending on the side effects of another.
+A reproducible runtime environment makes these questions answerable.
 
-## 4. Data Model and Object Relationships
+---
 
-A useful data model for this stage is not a chip layout model. It is a run model. The core objects are `run_id`, `tool_path`, `work_dir`, `script_entry`, `log_file`, `command_log`, `summary_file`, `tmp_dir`, `exit_status`, and `report_dir`. These objects can be stored as text reports, but they represent a real state space.
+## 4. The Runtime State Machine
 
-The important relationship is traceability. A report should point back to the command stream. The command stream should point back to configuration. Configuration should point back to the run directory. This chain lets the engineer distinguish design problems from environment problems.
+The first demo can be understood as a finite-state machine. It does not need to load a real chip design. It only needs to prove that the run wrapper, runtime context, Tcl entry point, and evidence artifacts form a clean loop.
 
-A practical debugging question is:
+```mermaid
+stateDiagram-v2
+    [*] --> ShellPrepared
+
+    ShellPrepared --> DirectoryPrepared: create logs/tmp/reports
+    DirectoryPrepared --> EnvExported: export project variables
+    EnvExported --> ToolLaunched: invoke EDA tool
+    ToolLaunched --> TclEntryLoaded: execute run Tcl
+    TclEntryLoaded --> SessionProbed: query basic commands and context
+    SessionProbed --> ReportsWritten: write runtime reports
+    ReportsWritten --> LogsCaptured: preserve logs and stdout/stderr
+    LogsCaptured --> Completed: clean exit status
+
+    ToolLaunched --> FailedLaunch: tool cannot start
+    TclEntryLoaded --> FailedTcl: Tcl entry fails
+    SessionProbed --> FailedProbe: required probe fails
+    ReportsWritten --> FailedReport: report cannot be written
+
+    FailedLaunch --> [*]
+    FailedTcl --> [*]
+    FailedProbe --> [*]
+    FailedReport --> [*]
+    Completed --> [*]
+```
+
+This state machine is useful because it separates different failure classes.
+
+A failed tool launch is different from a failed Tcl command. A failed Tcl command is different from a missing report directory. A missing report is different from an incomplete command trace. Without this separation, a single statement such as “the run failed” is not very useful.
+
+For a real backend platform, failure classification matters. Runtime failures should be identified before design-data failures. A netlist import error should not be mixed with a missing license variable. A Tcl syntax error should not be mixed with a stale run directory. A write-permission problem should not be mixed with a timing-constraint problem.
+
+---
+
+## 5. Why Design Import Should Not Be the First Test
+
+Design import is a heavy test because it depends on several layers at the same time:
 
 ```text
-Which state did this stage promise to create, and which report proves that it was created?
+Verilog syntax
+library search path
+physical abstract availability
+technology-layer consistency
+top module name
+link path
+constraint assumptions
+tool parser behavior
+run directory
+log capture
 ```
 
-When this question cannot be answered, the flow is not yet engineered. It may still run, but it is not ready to be used as a repeatable technical asset.
+If the first demo starts with design import and fails, the failure space is too large. The engineer may need to ask many unrelated questions at once.
 
-## 5. Demo Design
+| Failure symptom | Possible root cause |
+|---|---|
+| Tool cannot start | Wrong executable path, missing license, missing runtime library. |
+| Tcl script exits early | Wrong shell expansion, missing environment variable, syntax issue. |
+| Netlist cannot be read | File path, parser option, HDL dialect, include directory. |
+| Library cannot be found | Search path, file permission, corner naming, compressed-file handling. |
+| Top cannot be linked | Top name mismatch, missing module, missing library cell. |
+| DEF cannot be loaded | Version mismatch, missing rows/tracks, missing technology context. |
+| Reports missing | Wrong output path, no write permission, script branch skipped. |
 
-The paired demo is:
+This is why the first test should be simpler. It should only verify that the runtime layer works.
+
+The first demo should answer:
 
 ```text
-LAY-BE-01_reproducible_environment
+Can the tool be invoked through a controlled wrapper?
+Can the wrapper create a clean run directory structure?
+Can project variables be exported to the tool process?
+Can a known Tcl entry file be executed?
+Can the run produce logs and reports in known locations?
+Can the command stream be captured?
+Can the run summary be reviewed without opening a GUI?
 ```
 
-The demo should be self-contained. It should use a local directory structure, local configuration, local Tcl entry point, local logs, local reports, and local output directories. It should not depend on files generated by another demo. The purpose is to make the stage understandable from the directory alone.
+Only after these questions are answered should design import become the next layer of validation.
 
-A recommended directory structure is:
+---
+
+## 6. HOME Configuration vs Project Configuration
+
+Many EDA tools can read user-level startup files. This is convenient for personal use, but dangerous when the goal is a project-level engineering flow.
+
+A user-level configuration and a project-level configuration have different meanings.
+
+| Configuration type | Typical location | Suitable content | Risk if misused |
+|---|---|---|---|
+| User-level configuration | `$HOME` | UI preferences, personal aliases, display habits. | Hidden project dependency. |
+| Project-level configuration | repository or project root | library paths, report paths, design variables, stage switches. | Should be reviewed and versioned. |
+| Run-level configuration | run directory | run name, output directory, temporary directory, selected stage. | Must be isolated per run. |
+| Tool default configuration | tool installation | vendor defaults and built-in behavior. | May change across releases. |
+
+The safest rule is simple:
+
+```text
+Project behavior must be defined by project-owned files.
+```
+
+A personal startup file can make interactive work easier, but it should not define the formal runtime behavior of a project. If a backend flow depends on files under one engineer's home directory, the flow is not portable.
+
+A reproducible runtime environment should use explicit project initialization:
+
+```tcl
+source ./config/project_init.tcl
+source ./config/path_setup.tcl
+source ./config/report_setup.tcl
+source ./config/runtime_options.tcl
+```
+
+The exact file names may vary. The principle is stable: startup dependency should be visible in the Tcl entry point and stored with the project.
+
+---
+
+## 7. Hidden Initialization Is a Hidden Input
+
+An EDA tool may load startup files, preferences, Tcl helpers, aliases, or previous GUI settings during launch. These behaviors can improve usability, but they also create hidden inputs.
+
+Hidden inputs are dangerous because they are not visible in the main run script.
+
+For example, a visible script may look like this:
+
+```tcl
+source ./config/project_init.tcl
+source ./stages/import_design.tcl
+source ./stages/floorplan.tcl
+```
+
+But the tool session may already contain settings loaded before the script begins:
+
+```text
+custom aliases
+changed parameter defaults
+modified search paths
+changed report units
+GUI preferences
+previous session settings
+```
+
+A backend run is reproducible only when such hidden inputs are either disabled, recorded, or treated as non-project behavior.
+
+A practical approach is to divide initialization into three zones:
+
+```mermaid
+flowchart TB
+    A[Tool Built-in Defaults] --> B[Allowed User Convenience Layer]
+    B --> C[Explicit Project Init]
+    C --> D[Explicit Run Config]
+    D --> E[Stage Tcl]
+    E --> F[Reports and Logs]
+
+    B -. should not decide project behavior .-> C
+```
+
+The project initialization layer should override project-critical behavior. The run configuration should define run-specific directories and stage switches. Stage Tcl files should focus on design operations rather than environment discovery.
+
+This separation keeps the flow readable and debuggable.
+
+---
+
+## 8. Directory Architecture for a Reproducible Run
+
+A clean directory structure is not a cosmetic issue. It is part of the runtime architecture.
+
+A recommended minimal layout is:
 
 ```text
 LAY-BE-01_reproducible_environment/
-  README.md
-  README.zh-CN.md
-  config/
-  scripts/
-  tcl/
-  data/
-  logs/
-  reports/
-  tmp/
-  output/
+├── README.md
+├── config/
+│   ├── project_init.tcl
+│   ├── path_setup.tcl
+│   └── runtime_options.tcl
+├── scripts/
+│   └── run_demo.csh
+├── tcl/
+│   ├── run_demo.tcl
+│   └── probe_session.tcl
+├── reports/
+│   ├── runtime_manifest.rpt
+│   ├── session_probe.rpt
+│   └── artifact_check.rpt
+├── logs/
+│   ├── run.log
+│   ├── run.cmd.log
+│   ├── run.sum.log
+│   └── run.stdout_stderr.log
+├── tmp/
+│   └── run.tmp/
+└── output/
+    └── .gitkeep
 ```
 
-The demo should not try to be a production tapeout flow. It should be a minimal engineering microscope. It should expose one concept clearly, generate stable reports, and make the difference between success, warning, and failure visible.
+The important point is not the exact spelling of each directory. The important point is role separation.
 
-The demo should produce at least three categories of evidence:
+| Directory | Responsibility |
+|---|---|
+| `config/` | Project-owned settings and explicit initialization. |
+| `scripts/` | Shell-level launch wrappers. |
+| `tcl/` | Tool-level command stream and probe logic. |
+| `reports/` | Human-reviewable evidence produced by the run. |
+| `logs/` | Raw runtime traces and command history. |
+| `tmp/` | Isolated temporary data. |
+| `output/` | Output artifacts produced by later stages. |
+
+This layout allows an engineer to inspect the runtime without opening the tool GUI. It also makes the repository easier to review because each file category has a stable purpose.
+
+---
+
+## 9. Shell Layer: Why `set` and `setenv` Matter in csh
+
+Many backend environments still use `csh` or `tcsh` because older EDA infrastructure, legacy farm wrappers, and project scripts were built around them.
+
+In `csh`, there is an important difference between `set` and `setenv`.
 
 ```text
-1. Input evidence: what files, variables, and assumptions were used.
-2. State evidence: what runtime or database state was created.
-3. Review evidence: what report should be inspected before moving on.
+set     : defines a shell variable inside the current csh process
+setenv  : exports an environment variable to child processes
 ```
 
-## 6. What to Check in Reports
+The backend tool is a child process of the shell wrapper. If the tool Tcl script needs to read a variable through `env(...)`, the shell wrapper must export it with `setenv`.
 
-For this stage, the report checklist should include:
+A typical split is:
 
-- The tool executable path is printed in a report.
-- The working directory and project root are recorded.
-- All output directories are created before the tool stage begins.
-- Main log, command log, summary, and standard output are separated.
-- The run exits with a clear status marker.
+```csh
+set RUN_ROOT = `pwd`
+set LOG_DIR  = "$RUN_ROOT/logs"
+set TMP_DIR  = "$RUN_ROOT/tmp/run.tmp"
 
-The strongest reports are compact and explicit. They should be short enough to read quickly, but structured enough to support comparison across runs. A report that only says "done" is not useful. A report that names the checked assumptions and records pass or fail status is useful.
+setenv LAY_PROJECT_ROOT "$RUN_ROOT"
+setenv LAY_REPORT_DIR   "$RUN_ROOT/reports"
+setenv LAY_LOG_DIR      "$LOG_DIR"
+setenv LAY_TMP_DIR      "$TMP_DIR"
+setenv LAY_TCL_ENTRY    "$RUN_ROOT/tcl/run_demo.tcl"
+```
 
-A good report also distinguishes between missing inputs, unsupported commands, empty object collections, and real design errors. These cases require different debugging actions.
+Shell-local variables are useful for path construction inside the wrapper. Exported variables define the contract between the wrapper and the backend tool process.
 
-## 7. Common Pitfalls
+Inside Tcl, the project can then read:
 
-Common pitfalls include:
+```tcl
+set project_root $env(LAY_PROJECT_ROOT)
+set report_dir   $env(LAY_REPORT_DIR)
+set log_dir      $env(LAY_LOG_DIR)
+set tmp_dir      $env(LAY_TMP_DIR)
+```
 
-- Relying on the current shell without recording it.
-- Using relative paths before the working directory is fixed.
-- Allowing personal startup files to silently change tool behavior.
-- Capturing a main log but losing the command trace.
-- Writing temporary files into a shared directory where another run can overwrite them.
+This makes the shell-to-tool boundary explicit.
 
-The deeper issue behind these pitfalls is state ambiguity. Backend problems become expensive when the engineer cannot tell whether the failure came from the design, the library, the tool context, the command interface, or the run environment. The purpose of the demo is to reduce that ambiguity.
+---
 
-## 8. Engineering Takeaways
+## 10. Tool Entry Pattern
 
-The key takeaway is that backend flow quality comes from controlled state transitions, not from long scripts. A script is only one part of the system. The real system includes configuration, runtime context, design database, library context, constraints, reports, logs, and handoff artifacts.
+A generic backend tool invocation may look like this:
 
-For this stage, the engineering discipline can be summarized as:
+```csh
+#!/bin/csh -f
+
+set RUN_ROOT = `pwd`
+set LOG_DIR  = "$RUN_ROOT/logs"
+set TMP_DIR  = "$RUN_ROOT/tmp/run.tmp"
+set RPT_DIR  = "$RUN_ROOT/reports"
+
+mkdir -p "$LOG_DIR"
+mkdir -p "$TMP_DIR"
+mkdir -p "$RPT_DIR"
+
+setenv LAY_PROJECT_ROOT "$RUN_ROOT"
+setenv LAY_REPORT_DIR   "$RPT_DIR"
+setenv LAY_LOG_DIR      "$LOG_DIR"
+setenv LAY_TMP_DIR      "$TMP_DIR"
+setenv LAY_TCL_ENTRY    "$RUN_ROOT/tcl/run_demo.tcl"
+
+setenv BACKEND_TOOL_BIN /path/to/backend_tool
+
+$BACKEND_TOOL_BIN \
+    -work_dir "$RUN_ROOT" \
+    -log "$LOG_DIR/run.log" \
+    -cmd_log "$LOG_DIR/run.cmd.log" \
+    -summary_log "$LOG_DIR/run.sum.log" \
+    -tmp_dir "$TMP_DIR" \
+    -stdin < "$LAY_TCL_ENTRY" \
+    >& "$LOG_DIR/run.stdout_stderr.log"
+
+set STATUS = $status
+echo "RUN_EXIT_STATUS: $STATUS" >> "$RPT_DIR/runtime_manifest.rpt"
+exit $STATUS
+```
+
+The option names above are intentionally generic. Different EDA tools use different command-line syntax. The architecture remains the same:
 
 ```text
-Do not only run the command.
-Define the expected state.
-Generate evidence for that state.
-Review the evidence before moving forward.
+explicit tool entry
+explicit work directory
+explicit Tcl entry
+explicit logs
+explicit temporary directory
+explicit exit status
 ```
 
-This is the difference between a command sequence and a backend flow engineering practice. The former may work once. The latter can be reviewed, repeated, compared, debugged, and reused.
+A run wrapper should not be a pile of launch commands. It should be the outer boundary of the engineering contract.
 
-## Architecture Deep Dive: What the Stage Really Owns
+---
 
-This stage owns **runtime determinism before design data is touched**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
+## 11. Tcl Entry Pattern
 
-The main architectural objects for this stage are:
+The Tcl entry point should be small and predictable. It should establish the project context, create a runtime manifest, probe the session, and then stop. The first demo does not need to import a design.
+
+Example structure:
+
+```tcl
+set project_root $env(LAY_PROJECT_ROOT)
+set report_dir   $env(LAY_REPORT_DIR)
+set log_dir      $env(LAY_LOG_DIR)
+set tmp_dir      $env(LAY_TMP_DIR)
+
+source "$project_root/config/project_init.tcl"
+
+set fp [open "$report_dir/runtime_manifest.rpt" w]
+puts $fp "DEMO_ID: LAY-BE-01_reproducible_environment"
+puts $fp "PROJECT_ROOT: $project_root"
+puts $fp "REPORT_DIR: $report_dir"
+puts $fp "LOG_DIR: $log_dir"
+puts $fp "TMP_DIR: $tmp_dir"
+puts $fp "TCL_ENTRY: $env(LAY_TCL_ENTRY)"
+close $fp
+
+set fp [open "$report_dir/session_probe.rpt" w]
+puts $fp "TCL_INTERPRETER: active"
+puts $fp "PROJECT_INIT: loaded"
+puts $fp "SESSION_PROBE: completed"
+close $fp
+```
+
+The goal is not to test placement or timing. The goal is to validate the runtime path from shell wrapper to Tcl execution to report generation.
+
+---
+
+## 12. Command Log as State-Transition Evidence
+
+The main log explains what the tool reported. The command log explains what the session executed.
+
+For backend flow engineering, both are important.
+
+| Artifact | Main question answered |
+|---|---|
+| Main log | What did the tool print during the run? |
+| Command log | What commands were executed, and in what order? |
+| Summary log | What stage-level result did the run produce? |
+| stdout/stderr log | What happened at the shell process boundary? |
+| Runtime manifest | What was the declared runtime context? |
+
+A command log is especially valuable because backend failures are often sequence-dependent.
+
+A command may be valid in one state and invalid in another. A property query may work only after a design is linked. A report may require loaded timing libraries. A floorplan command may require defined rows and sites. A routing command may require tracks and layer rules.
+
+Therefore, the engineering question is not only:
 
 ```text
-launcher, shell context, working directory, startup files, logs, command trace, temporary area, exit markers
+Is this command valid?
 ```
 
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
-
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
+It is also:
 
 ```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
+Was this command executed after the required state had been established?
 ```
 
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
+The command log is the evidence trail for this question.
 
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
+---
 
-## Methodology Playbook
+## 13. Runtime Manifest
 
-For this topic, the recommended methodology is:
+The runtime manifest is a compact report that records the declared context of a run. It should be easy to read in a text editor, easy to diff, and easy to archive.
+
+A minimal manifest may contain:
 
 ```text
-freeze runtime inputs; print every critical path; separate setup from execution; make the first report prove that the run context is controlled
+DEMO_ID: LAY-BE-01_reproducible_environment
+RUN_ROOT: /path/to/run
+TOOL_BIN: /path/to/backend_tool
+TCL_ENTRY: /path/to/run/tcl/run_demo.tcl
+PROJECT_INIT: /path/to/run/config/project_init.tcl
+REPORT_DIR: /path/to/run/reports
+LOG_DIR: /path/to/run/logs
+TMP_DIR: /path/to/run/tmp/run.tmp
+USER: darren
+HOST: build-server-01
+START_TIME: 2026-xx-xx xx:xx:xx
+EXIT_STATUS: 0
 ```
 
-This methodology can be applied at three levels.
+A more complete manifest can also record selected environment variables, version probes, command availability checks, and generated report paths.
 
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
+The manifest should not replace detailed logs. It should provide a fast index into the run.
 
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
+---
 
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
+## 14. Reproducibility Checklist
 
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
+Before moving to design import, the following checklist should pass.
 
-## Design Review Questions
+| Check item | Expected result |
+|---|---|
+| Tool binary exists | The wrapper can locate the backend tool executable. |
+| Tool can be launched | A basic session starts from the wrapper. |
+| Work directory is fixed | The session starts under the expected run root. |
+| Project init is explicit | The Tcl entry point sources project-owned configuration. |
+| Logs are generated | Main log, command log, summary log, and stdout/stderr log exist. |
+| Reports are generated | Runtime manifest and session probe reports exist. |
+| Temporary directory is isolated | The run uses a dedicated temporary directory. |
+| Exit status is captured | The wrapper returns success or failure to the caller. |
+| No design import is required | Runtime validation does not depend on LEF, Liberty, Verilog, DEF, or SDC. |
 
-Before accepting this stage as healthy, review the following question:
+This checklist is intentionally independent from design content. A clean result means the runtime layer is ready for the next demo.
 
-> Can another engineer reproduce the same run directory and explain every generated file?
+---
 
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
+## 15. Common Anti-Patterns
 
-A reviewer should also ask:
+A reproducible runtime environment prevents several common backend-flow anti-patterns.
+
+### 15.1 Using `tool` from `PATH` without version control
+
+If the wrapper only calls:
+
+```bash
+tool
+```
+
+then the selected executable depends on `PATH`. Another user or server may pick a different release.
+
+A stable wrapper should declare the tool entry point or receive it through a controlled project variable.
+
+### 15.2 Writing logs into the current directory
+
+If the run writes logs wherever the shell happens to be, later review becomes difficult. A run should have a stable log directory.
+
+### 15.3 Depending on personal startup files
+
+Personal startup files should not carry project behavior. They are not shared project state.
+
+### 15.4 Mixing temporary data across runs
+
+If multiple runs share the same temporary directory, stale files can affect later diagnosis. Each run should have its own temporary location.
+
+### 15.5 Treating a successful launch as a successful flow
+
+A tool that opens successfully has only passed the launch test. It has not yet proved that the project runtime is controlled.
+
+### 15.6 Debugging design import before debugging runtime
+
+If the runtime layer is not clean, design import debug becomes noisy. Runtime evidence should be checked first.
+
+---
+
+## 16. Relationship to Later Backend Stages
+
+The first demo may look simple, but it supports every later backend stage.
+
+```mermaid
+flowchart TD
+    R[Reproducible Runtime Environment]
+    R --> I[Design Import]
+    R --> L[Library and Format Setup]
+    R --> F[Floorplan]
+    R --> P[Placement]
+    R --> T[Timing Analysis]
+    R --> C[Clock Tree Synthesis]
+    R --> G[Routing]
+    R --> V[Physical Verification Handoff]
+    R --> E[ECO]
+
+    I --> DB[Design Database]
+    L --> DB
+    F --> DB
+    P --> DB
+    T --> DB
+    C --> DB
+    G --> DB
+    V --> DB
+    E --> DB
+```
+
+Later stages all depend on clean evidence:
+
+- Design import requires clear file paths and parser logs.
+- Library setup requires library-search evidence.
+- Floorplan requires reportable die/core/row state.
+- Placement requires utilization, legality, congestion, and timing reports.
+- Timing analysis requires constraints, operating conditions, and path reports.
+- Clock tree synthesis requires clock definitions, skew groups, and clock reports.
+- Routing requires route status, DRC status, and parasitic extraction context.
+- Physical verification handoff requires export manifests and rule-deck coordination.
+- ECO requires before/after comparison and repeatable debug material.
+
+If the runtime layer is unstable, every later stage inherits instability.
+
+---
+
+## 17. Demo Design: `LAY-BE-01_reproducible_environment`
+
+The first demo should not attempt to prove physical implementation quality. It should prove that the repository has a controlled runtime skeleton.
+
+### 17.1 Inputs
+
+| Input | Purpose |
+|---|---|
+| `scripts/run_demo.csh` | Shell-level launcher. |
+| `config/project_init.tcl` | Project-level initialization entry. |
+| `config/runtime_options.tcl` | Runtime options used by the demo. |
+| `tcl/run_demo.tcl` | Tool-level Tcl entry point. |
+| Environment variables | Shell-to-tool runtime contract. |
+
+### 17.2 Outputs
+
+| Output | Purpose |
+|---|---|
+| `logs/run.log` | Main tool log. |
+| `logs/run.cmd.log` | Command trace if supported by the tool. |
+| `logs/run.sum.log` | Summary log if supported by the tool. |
+| `logs/run.stdout_stderr.log` | Shell-level output capture. |
+| `reports/runtime_manifest.rpt` | Declared runtime context. |
+| `reports/session_probe.rpt` | Basic tool session probe. |
+| `reports/artifact_check.rpt` | Confirmation that required output files exist. |
+
+### 17.3 Pass Criteria
+
+The demo passes when:
 
 ```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
+the tool launches from the wrapper
+the Tcl entry point is executed
+the project initialization file is loaded
+reports are written under reports/
+logs are written under logs/
+temporary data is isolated under tmp/
+the wrapper returns a meaningful exit status
 ```
 
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
+### 17.4 What This Demo Should Not Do
 
-## Additional Note: Reproducibility Is a Data Problem
+This demo should not:
 
-Reproducibility is often described as a process habit, but at the tool-flow level it is also a data problem. A run must preserve enough metadata to make its own context recoverable. That means the run directory should be treated as a small database: configuration files are inputs, logs are transaction records, reports are derived views, and output databases are stage results. Once viewed this way, it becomes natural to version run inputs, compare reports, and preserve command traces with the same seriousness as design files.
+```text
+read a real netlist
+load full technology data
+load Liberty timing libraries
+import DEF
+initialize floorplan
+run placement
+run timing
+run routing
+```
+
+Those operations belong to later demos. Keeping the first demo small makes it easier to isolate runtime problems from design-data problems.
+
+---
+
+## 18. Engineering Methodology
+
+A reproducible backend runtime can be built through the following methodology.
+
+```mermaid
+flowchart LR
+    A[Declare Context] --> B[Create Run Directories]
+    B --> C[Export Runtime Variables]
+    C --> D[Launch EDA Tool]
+    D --> E[Load Project Init]
+    E --> F[Probe Session]
+    F --> G[Write Reports]
+    G --> H[Check Artifacts]
+    H --> I[Return Exit Status]
+```
+
+Each step should have one responsibility:
+
+| Step | Responsibility |
+|---|---|
+| Declare context | Identify run root, tool entry, Tcl entry, and report locations. |
+| Create directories | Ensure output locations exist before launching the tool. |
+| Export variables | Pass project-level paths across the shell/tool boundary. |
+| Launch tool | Start the backend tool in a controlled work directory. |
+| Load project init | Establish project-owned initialization. |
+| Probe session | Confirm the Tcl interpreter and basic runtime commands are available. |
+| Write reports | Produce reviewable evidence. |
+| Check artifacts | Confirm expected files were generated. |
+| Return status | Make success or failure visible to the caller. |
+
+This methodology is intentionally conservative. Backend flow failures are expensive. It is better to fail early with a clear runtime error than to continue into design import under an unknown session state.
+
+---
+
+## 19. Key Takeaways
+
+The first step in backend flow engineering is not design import. It is runtime control.
+
+A reproducible runtime environment establishes:
+
+```text
+who launched the run
+where the run was launched
+which tool entry point was used
+which project initialization was loaded
+which Tcl command stream was executed
+where logs and reports were written
+where temporary data was stored
+what exit status was returned
+```
+
+Once this layer is stable, design import becomes a meaningful next step. Without this layer, design import is only a command executed under uncertain conditions.
+
+A backend flow should not be judged by whether it runs once. It should be judged by whether its runtime context, command stream, and evidence artifacts can be inspected, compared, and reproduced.
+
+That is why the first demo in this series is `LAY-BE-01_reproducible_environment`.
