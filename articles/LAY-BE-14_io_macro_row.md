@@ -1,349 +1,950 @@
-# 14. I/O, Macro, and Row: How Physical Constraints Shape the Backend Search Space
+# 14. IO / Macro / Row: How Physical Constraints Define the Backend Implementation Search Space
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-14_io_macro_row**  
-> Tags: Backend Flow, IO, Macro, Row, Physical Constraint, Search Space
+Author: Darren H. Chen  
+Topic: Backend Flow Engineering / Physical Design / EDA Tool Infrastructure  
+Demo: `LAY-BE-14_io_macro_row`  
+Tags: `Backend Flow`, `EDA`, `Physical Design`, `Floorplan`, `IO Planning`, `Macro Placement`, `Row`, `Site`, `Search Space`, `Physical Constraints`
 
-The backend problem is not solved in an empty plane; I/O pins, macros, and rows define the feasible search space before optimization begins.
+In backend implementation, placement, CTS, routing, timing closure, and ECO are often discussed as if they were independent algorithmic stages. In practice, they are not independent. They are all constrained by a physical search space that is defined much earlier.
 
-In a real backend project, the visible command line is only the surface. Under it, the tool is continuously converting text files, technology rules, design constraints, and physical edits into a typed implementation database. A robust flow is therefore built around three questions:
-
-```text
-1. What design state is this stage supposed to create or refine?
-2. Which objects and relationships must be queried to verify that state?
-3. Which reports prove that the state is safe enough for the next stage?
-```
-
-The answer to those questions is the foundation of backend flow engineering.
-
-## 1. Conceptual Model
-
-The important point in this topic is that a backend step is never an isolated command. It is a state transition inside a larger physical implementation system. The input state contains design objects, library models, constraints, and previous physical decisions. The output state must be both usable by the next stage and explainable by reports.
-
-For this article, the most relevant objects are:
-
-- `I/O pin`
-- `I/O guide`
-- `macro`
-- `macro pin`
-- `placement row`
-- `site`
-- `keepout`
-- `channel`
-- `standard-cell region`
-
-These objects are not just names. They are database entries with type, ownership, geometry, connectivity, timing, and sometimes manufacturing meaning. When a script manipulates them, it is manipulating the implementation state of the chip.
-
-A practical mental model is:
+That search space is not only determined by die size or core utilization. It is strongly shaped by three physical constraint systems:
 
 ```text
-source files + constraints + technology context
-        |
-        v
-backend database objects
-        |
-        v
-stage-specific transformation
-        |
-        v
-reports + updated database + handoff data
+IO     -> boundary connectivity and external interface constraints
+Macro  -> large fixed or semi-fixed objects that occupy and block space
+Row    -> legal placement grid for standard cells
 ```
 
-This model is simple, but it prevents a common mistake: treating a backend flow as a sequence of text commands. A mature flow treats every stage as a controlled transition from one database state to another.
+If floorplan defines the physical world, then IO, macro, and row define how objects can legally and efficiently exist inside that world.
 
-## 2. Backend Architecture View
-
-A EDA tool usually exposes the stage through Tcl or another command interface. However, the real architecture is layered. A command is parsed, resolved against the current database, checked against technology and design rules, executed by an internal engine, and finally reflected in logs, reports, and updated design objects.
-
-For this topic, a useful architecture decomposition is:
-
-- `boundary interface model`
-- `macro abstraction model`
-- `row/site grid model`
-- `connectivity pressure model`
-- `constraint consistency checker`
-
-The flow can be visualized as:
+This article focuses on one question:
 
 ```text
-      [boundary interface model]
-              |
-              v
-      [macro abstraction model]
-              |
-              v
-      [row/site grid model]
-              |
-              v
-      [connectivity pressure model]
-              |
-              v
-      [constraint consistency checker]
+Why do IO, macro, and row directly determine the search space of backend implementation?
 ```
 
-This architecture view matters because many backend issues are not caused by a single bad command. They are caused by a mismatch between layers. For example, a script may request a legal operation, but the database context is incomplete. A file may be syntactically valid, but the objects created from it do not match the assumptions of the next stage. A report may look clean, but only because the relevant object collection was empty.
+The answer is not simply that they affect placement. They define the boundary conditions for placement, routing, timing, power distribution, and physical signoff.
 
-Therefore, a GitHub demo should not only run a command. It should also show the layer boundaries: configuration, database input, stage execution, report generation, and verification checks.
+---
 
-## 3. Engineering Methodology
+## 1. What Is a Search Space in Backend Flow?
 
-The recommended methodology is to move from feasibility to quality. Feasibility asks whether the required objects, constraints, and database context exist. Quality asks whether the result is good enough. Mixing these two questions is a common source of confusion.
+In a backend flow, an EDA tool rarely solves an unconstrained problem.
 
-For this stage, the working rules are:
+Placement does not search every coordinate on the chip. Routing does not search every possible geometric path. CTS does not place buffers anywhere. ECO does not freely modify any object.
 
-- `model I/O as an interface contract`
-- `place macros with pin access and routing channels in mind`
-- `validate row continuity before placement`
-- `separate fixed objects from movable objects`
-- `turn physical restrictions into measurable regions`
+Every algorithm operates inside a constrained search space.
 
-The general methodology is:
+For placement, the search space is shaped by:
 
 ```text
-Precheck  ->  Stage execution  ->  State query  ->  Report  ->  Comparison  ->  Next-stage gate
+core area
+standard-cell rows
+site grid
+macro locations
+placement blockages
+fixed cells
+IO pin locations
+power structures
+density targets
+routing resource availability
+timing-critical connectivity
 ```
 
-The precheck phase should verify that all required inputs and assumptions exist. The execution phase should be as deterministic as possible. The query phase should inspect the database rather than relying only on log text. The report phase should write stable files that can be compared across runs. The gate phase should decide whether the next stage is allowed to proceed.
-
-This is especially important for GitHub-style examples. A demo that only prints a successful run log is weak evidence. A demo that prints object counts, state checks, and report summaries is much stronger.
-
-## 4. Data Model and Object Relationships
-
-The data model behind this topic can be understood as a graph. Objects are nodes. Connectivity, hierarchy, geometry, timing arcs, rule references, and ownership are edges. The EDA tool does not operate on a flat list; it operates on a structured graph with many views.
-
-A simplified view is:
+For routing, the search space is shaped by:
 
 ```text
-logical hierarchy ---- owns ---- instances / modules
-        |                         |
-        |                         v
-        |                    pins / ports ---- connect ---- nets
-        |                         |                         |
-        v                         v                         v
-constraints              timing arcs / checks          physical routes
-        |                         |                         |
-        v                         v                         v
-reports                  timing paths                  DRC / PV results
+routing layers
+track grids
+routing blockages
+macro obstructions
+pin access points
+special nets
+power stripes
+preferred directions
+non-default route rules
 ```
 
-The most important engineering implication is that every stage must preserve cross-view consistency. A physical change may affect timing. A timing fix may affect routing. A routing fix may affect physical verification. A low-power or hierarchical constraint may affect all of them.
-
-The right way to debug is not to ask only, "Which command failed?" The better question is:
+For timing closure, the search space is shaped by:
 
 ```text
-Which view of the design became inconsistent with another view?
+cell locations
+net distances
+clock source and sink geometry
+available buffer locations
+routing detours
+macro-induced path topology
+IO boundary positions
 ```
 
-## 5. Demo Design
-
-The paired demo is:
+Therefore, backend implementation is not just:
 
 ```text
-LAY-BE-14_io_macro_row
+run placement
+run CTS
+run routing
+fix timing
 ```
 
-The demo should be self-contained. It should use a local directory structure, local sample data where possible, local Tcl scripts, local report files, and a local run manifest. It should not depend on files from another demo. This makes the example easy to copy, review, and rerun.
+It is more accurately:
 
-A recommended directory structure is:
+```text
+define the physical search space
+verify the constraints
+run physical optimization inside that search space
+measure the result
+adjust the model if necessary
+```
+
+The quality of the physical search space often determines whether downstream algorithms are solving a reasonable problem or struggling with an impossible one.
+
+---
+
+## 2. IO / Macro / Row as the Three Primary Spatial Constraint Systems
+
+IO, macro, and row constrain the design from different directions.
+
+| Constraint system | Main location | Primary role | Main downstream impact |
+|---|---|---|---|
+| IO | Boundary | Defines external connectivity | timing path direction, routing entry/exit, integration |
+| Macro | Interior or boundary-adjacent large blocks | Defines large occupied and blocked regions | placement area, routing channels, congestion, timing |
+| Row | Core placement area | Defines legal standard-cell sites | placement legality, utilization, legalization quality |
+
+They work together.
+
+A block with good macro locations but poor IO ordering may still produce routing congestion. A block with good IO and macro placement but fragmented rows may fail legalization. A block with dense rows but no macro channels may route poorly.
+
+A backend flow should not treat these as isolated settings. They should be reviewed as a single physical constraint model.
+
+```mermaid
+flowchart TD
+    A[IO Boundary Constraints] --> D[Physical Search Space]
+    B[Macro Occupancy and Keepout] --> D
+    C[Row / Site Legal Grid] --> D
+
+    D --> E[Legal Cell Locations]
+    D --> F[Routing Channels]
+    D --> G[Timing Path Geometry]
+    D --> H[Power Connection Feasibility]
+    D --> I[ECO Repair Space]
+
+    E --> J[Placement]
+    F --> K[Routing]
+    G --> L[Timing Closure]
+    H --> M[Power Integrity]
+    I --> N[Late-stage ECO]
+```
+
+The key idea is simple:
+
+```text
+IO tells the tool where the design talks to the outside world.
+Macro tells the tool where large internal obstacles and anchors exist.
+Row tells the tool where standard cells are legally allowed to land.
+```
+
+Together, they define what the implementation engine can and cannot do.
+
+---
+
+## 3. IO: The Boundary Is Not a Shell; It Is a Connectivity Contract
+
+IO pins appear at the boundary of a block or chip. This can make them look like a late physical detail.
+
+That is a dangerous simplification.
+
+An IO pin is a contract between the current design and the outside world.
+
+It defines:
+
+```text
+where external signals enter
+where output signals leave
+where clocks and resets enter
+where scan or test interfaces connect
+where power/ground enters or exits
+how this block connects to the parent level
+how package, bump, pad, or neighboring blocks interact with the design
+```
+
+IO planning affects not only boundary routing. It affects internal logic placement.
+
+If an input pin is placed on the left boundary but its consuming logic is naturally near the right side of the block, the tool may be forced into longer wires, larger delay, more buffering, and more routing demand.
+
+If a bus is ordered inconsistently with internal datapath direction, routing may cross unnecessarily.
+
+If clock or reset entry points are placed poorly, CTS and timing closure may become harder before CTS even begins.
+
+So IO planning is not cosmetic. It is one of the earliest physical definitions of the design's connectivity geometry.
+
+---
+
+## 4. IO Pins as Boundary Anchors
+
+A useful mental model is to treat IO pins as boundary anchors.
+
+```text
+external interface
+      ↓
+IO pin location
+      ↓
+internal net topology
+      ↓
+placement bias
+      ↓
+routing demand
+      ↓
+timing / congestion impact
+```
+
+For example:
+
+```text
+left-side input pins  -> tend to pull related logic toward the left
+right-side outputs    -> tend to pull output logic toward the right
+top-side bus pins     -> may bias datapath placement upward
+clock entry pin       -> affects clock root and early clock topology
+```
+
+This does not mean the tool simply places logic near every IO pin. Modern placement engines balance timing, wirelength, congestion, density, and many constraints. However, IO locations strongly influence the geometry of the connectivity graph.
+
+The relationship can be represented as:
+
+```mermaid
+flowchart LR
+    A[External System] --> B[IO Pin]
+    B --> C[Top-level Port]
+    C --> D[Internal Net]
+    D --> E[Driver / Load Pins]
+    E --> F[Placement Objective]
+    F --> G[Wirelength / Timing / Congestion]
+```
+
+When IO constraints are wrong, downstream algorithms may still produce a legal result, but it may be a poor solution to an avoidable problem.
+
+---
+
+## 5. Four Layers of IO Constraints
+
+IO planning has multiple layers.
+
+### 5.1 Direction constraints
+
+A pin may be:
+
+```text
+input
+output
+inout
+clock
+reset
+scan
+test
+power
+ground
+```
+
+Different directions and usages have different physical implications. A clock entry pin is not the same as a random input. A reset signal with high fanout is not the same as a local control signal. A power pin is not a signal pin.
+
+### 5.2 Edge constraints
+
+A pin may be constrained to:
+
+```text
+left edge
+right edge
+top edge
+bottom edge
+specific side
+specific slot
+specific coordinate range
+```
+
+Edge placement determines external interface direction and internal route entry points.
+
+### 5.3 Ordering constraints
+
+Pin ordering matters.
+
+For example:
+
+```text
+data[0], data[1], data[2], ...
+addr[0], addr[1], addr[2], ...
+req, ack, valid, ready
+```
+
+A poor ordering may introduce unnecessary route crossing. A good ordering can reduce routing complexity.
+
+### 5.4 Physical constraints
+
+IO pins may also require:
+
+```text
+specific metal layer
+minimum width
+spacing rule
+track alignment
+offset
+shape orientation
+shielding
+blockage avoidance
+```
+
+These constraints connect IO planning to actual manufacturable physical implementation.
+
+---
+
+## 6. IO Planning Failure Patterns
+
+IO-related issues often appear later as placement or routing issues.
+
+| Symptom | Possible IO root cause | Typical downstream impact |
+|---|---|---|
+| Long input-to-register paths | Input pins placed far from consuming logic | setup timing pressure |
+| Excessive routing crossover | Bus ordering mismatch | congestion and detours |
+| Clock latency imbalance | Clock entry point poorly located | CTS complexity |
+| Port constraint not applied | Port name mismatch | timing constraint failure |
+| Pin access DRC near boundary | illegal pin layer or spacing | routing failure |
+| Top-level integration mismatch | boundary location inconsistent with parent | handoff or integration issue |
+
+The lesson is:
+
+```text
+IO problems are often reported late, but created early.
+```
+
+A mature flow should generate IO summary and IO consistency reports before placement.
+
+---
+
+## 7. Macro: A Large Object Is Not Just a Large Cell
+
+Macros are fundamentally different from standard cells.
+
+A standard cell is typically small, repeated many times, and movable during placement.
+
+A macro is large, relatively few in number, and often fixed or semi-fixed. It may represent:
+
+```text
+SRAM
+ROM
+PLL
+analog block
+hard IP
+pre-routed block
+embedded memory
+custom layout block
+```
+
+Macros have strong physical effects:
+
+```text
+large occupied area
+fixed pin locations
+routing obstruction
+power connection requirements
+orientation restrictions
+keepout or halo requirements
+clock/reset access concerns
+pin access hotspots
+```
+
+A macro is not simply a bigger standard cell. It is a large physical obstacle and connectivity anchor.
+
+---
+
+## 8. Macro Placement Defines Global Floorplan Topology
+
+Macro placement influences:
+
+```text
+available standard-cell area
+routing channels
+critical path length
+IO-to-logic distance
+power grid topology
+clock distribution
+local congestion
+placement density
+```
+
+A poorly placed macro can create problems that no placement optimization can fully repair.
+
+For example:
+
+```text
+two macros placed too close together
+      ↓
+narrow channel
+      ↓
+insufficient routing tracks
+      ↓
+local congestion
+      ↓
+routing detours
+      ↓
+timing degradation and DRC pressure
+```
+
+Or:
+
+```text
+macro pins facing away from related logic
+      ↓
+longer local routes
+      ↓
+pin access congestion
+      ↓
+extra buffering
+      ↓
+timing and area penalty
+```
+
+Macro placement is one of the main reasons floorplan must come before placement. It defines the coarse topology of the physical problem.
+
+---
+
+## 9. Three Spatial Effects of a Macro
+
+A macro affects more than its rectangular boundary.
+
+### 9.1 Occupied region
+
+The macro body consumes physical area. Standard cells cannot be placed inside it.
+
+### 9.2 Blocked region
+
+The macro may block routing layers above or around it. This reduces available routing resources.
+
+### 9.3 Influence region
+
+The macro may require halo, keepout, power access region, routing channel, or pin access margin.
+
+A macro's real impact region is often larger than the macro itself.
+
+```text
++--------------------------------------------------+
+|                  Influence Region                |
+|   +------------------------------------------+   |
+|   |              Keepout / Halo              |   |
+|   |   +----------------------------------+   |   |
+|   |   |              MACRO               |   |   |
+|   |   |                                  |   |   |
+|   |   +----------------------------------+   |   |
+|   +------------------------------------------+   |
++--------------------------------------------------+
+```
+
+A flow that only checks macro boundary overlap is incomplete. It must also review halo, blockage, channel, and pin access implications.
+
+---
+
+## 10. Macro Pins as Connectivity Hotspots
+
+Macro pins are often concentrated on one or more macro edges.
+
+If many nets connect to those pins, routing demand can become highly localized.
+
+This can cause:
+
+```text
+pin access congestion
+local route congestion
+buffer insertion difficulty
+timing path concentration
+clock/reset access pressure
+DRC hotspots
+```
+
+A useful macro planning rule is:
+
+```text
+macro pins should face the logic they communicate with,
+and enough routing channel should exist near high-connectivity macro edges.
+```
+
+This is not always possible, especially under top-level integration constraints, but it is a critical review item.
+
+Macro planning should therefore include:
+
+```text
+macro orientation
+macro pin side
+macro-to-macro spacing
+macro-to-boundary spacing
+macro-to-logic distance
+macro power access
+routing channel reservation
+```
+
+---
+
+## 11. Row: The Legal Grid for Standard Cells
+
+Rows define where standard cells can legally be placed.
+
+A row is built from sites. A site is the basic legal placement unit for standard cells.
+
+```text
+site -> repeated placement unit
+row  -> continuous sequence of sites
+cell -> placed on row/site-aligned coordinates
+```
+
+Rows define:
+
+```text
+legal y coordinates
+x-alignment
+site step
+cell orientation
+power rail alignment
+legalizer movement space
+density calculation area
+tap/endcap insertion context
+```
+
+Without rows, standard-cell placement has no legal physical grid.
+
+---
+
+## 12. Row Is More Than Geometry
+
+Rows encode library and technology assumptions.
+
+A row may imply:
+
+```text
+row height
+site type
+legal orientation
+power rail pattern
+multi-height compatibility
+well/tap requirements
+endcap requirements
+placement region
+```
+
+If rows are wrong, placement may appear to start correctly but fail later.
+
+Common row-related issues include:
+
+```text
+cell cannot legalize
+multi-height cells cannot be placed
+power rails do not align
+tap or endcap insertion fails
+density report is misleading
+row fragments are too short
+legalizer pushes cells far from ideal locations
+```
+
+A row is therefore not just a visual stripe. It is a core placement data structure.
+
+---
+
+## 13. Row Fragmentation and Legalization Quality
+
+Global placement may initially position cells in a continuous mathematical space. Detailed placement and legalization must snap them onto legal rows and sites.
+
+If rows are fragmented by macros, blockages, keepouts, or power structures, legalization becomes harder.
+
+```text
+continuous ideal placement
+      ↓
+row/site snapping
+      ↓
+blocked regions removed
+      ↓
+short row fragments
+      ↓
+cell displacement
+      ↓
+wirelength / timing degradation
+```
+
+This is why a design may show acceptable global placement metrics but become worse after legalization.
+
+The root cause may be row fragmentation rather than poor placement cost function.
+
+A robust floorplan review should check:
+
+```text
+row count
+available row area
+row continuity
+minimum row fragment length
+row overlap with blockage
+row overlap with macro halo
+multi-height row support
+```
+
+---
+
+## 14. Coupling Between Row, Macro, and Blockage
+
+Rows, macros, and blockages are tightly coupled.
+
+Macros may remove row regions. Macro halos may require additional row trimming. Routing blockages may not remove rows directly, but they may make nearby placement unattractive. Power switches, power straps, or special regions may modify available placement space.
+
+Typical checks include:
+
+```text
+row does not cross macro body
+row does not enter macro keepout
+row fragments are not too short
+row area supports target utilization
+row/site matches standard-cell library
+row orientation is legal
+placement blockage is reflected in usable area calculation
+```
+
+If these checks are missing, the tool may try to solve a placement problem whose legal space is smaller or more fragmented than expected.
+
+---
+
+## 15. IO / Macro / Row Combined Model
+
+The following diagram shows how IO, macro, and row interact to define the implementation search space.
+
+```mermaid
+flowchart TD
+    A[Die / Core Boundary] --> B[IO Constraint Model]
+    A --> C[Macro Constraint Model]
+    A --> D[Row / Site Grid Model]
+
+    B --> E[Boundary Connectivity Geometry]
+    C --> F[Occupied Area / Blockage / Channel]
+    D --> G[Legal Standard-cell Locations]
+
+    E --> H[Placement Search Space]
+    F --> H
+    G --> H
+
+    H --> I[Global Placement]
+    I --> J[Legalization]
+    J --> K[CTS]
+    K --> L[Routing]
+    L --> M[Timing / DRC / ECO Feedback]
+```
+
+A simplified database view looks like this:
+
+```text
+PhysicalConstraintState = {
+    die_boundary,
+    core_boundary,
+    io_pins,
+    io_guides,
+    macro_instances,
+    macro_halos,
+    macro_blockages,
+    rows,
+    sites,
+    placement_blockages,
+    routing_channels,
+    utilization_targets
+}
+```
+
+This state is consumed by placement, CTS, routing, timing analysis, power planning, and ECO.
+
+---
+
+## 16. Constraint Consistency Before Placement
+
+Before placement, a backend flow should verify that IO, macro, and row constraints are self-consistent.
+
+Key checks include:
+
+```text
+IO pins are inside legal boundary
+IO pin layers are available
+IO pins do not overlap illegally
+IO order matches interface intent
+macro locations are inside die/core as intended
+macros do not overlap
+macro halos do not close all routing channels
+macro orientations are legal
+rows do not cross macro bodies
+rows do not enter keepout regions
+site name matches the library
+available row area supports utilization target
+power/ground pins have connection strategy
+routing channels are not fully blocked
+```
+
+This is a gate before placement, not a late-stage debug activity.
+
+---
+
+## 17. Why Constraint Reports Matter
+
+Physical constraints are often visual. Engineers naturally inspect a layout window.
+
+Visual inspection is useful but insufficient.
+
+Many issues are not obvious visually:
+
+```text
+halo overlap exists but is not displayed
+row fragments are too short
+IO pin layer is illegal
+site name mismatches library site
+available placement area is lower than expected
+macro channel has too few routing tracks
+a blockage exists on a critical layer
+```
+
+Therefore, a mature flow should generate reports.
+
+Recommended reports include:
+
+| Report | Purpose |
+|---|---|
+| `io_pin_summary.rpt` | Lists ports, directions, edge/layer/location if available |
+| `io_order_check.rpt` | Checks interface order and grouping assumptions |
+| `macro_summary.rpt` | Lists macro size, location, orientation, status |
+| `macro_overlap_check.rpt` | Detects macro-to-macro or macro-to-boundary overlap |
+| `macro_channel_check.rpt` | Reviews spacing and possible routing channels |
+| `row_site_summary.rpt` | Lists row count, site type, orientation, available area |
+| `row_fragment_check.rpt` | Detects short or fragmented rows |
+| `placement_area_summary.rpt` | Reports available placement area and utilization implication |
+| `constraint_consistency.rpt` | Summarizes pass/warn/fail status before placement |
+
+These reports turn physical intuition into reviewable engineering evidence.
+
+---
+
+## 18. Recommended Constraint Modeling Order
+
+A robust flow should avoid randomly modifying IO, macro, and row constraints in an uncontrolled order.
+
+A clear order is:
+
+```text
+1. Define die and core boundary
+2. Load or define IO constraints
+3. Place macros or import macro locations
+4. Apply macro halo / keepout / blockage
+5. Generate or adjust rows
+6. Check row vs macro / blockage consistency
+7. Compute available placement area
+8. Review routing channels
+9. Generate constraint reports
+10. Enter placement
+```
+
+This order follows one principle:
+
+```text
+large-scale spatial constraints first,
+fine-grained placement search second.
+```
+
+IO and macro constraints define large-scale topology. Rows define the legal grid. Placement then searches within that model.
+
+---
+
+## 19. IO / Macro / Row Readiness State Machine
+
+A demo or production flow can model readiness as a small state machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> BoundaryReady
+    BoundaryReady --> IOReady: define/check IO pins
+    IOReady --> MacroReady: place/check macros
+    MacroReady --> RowReady: generate/check rows
+    RowReady --> ConstraintChecked: run consistency reports
+    ConstraintChecked --> PlacementReady: all blocking checks pass
+
+    IOReady --> ConstraintFailed: illegal IO / missing boundary
+    MacroReady --> ConstraintFailed: overlap / no channel
+    RowReady --> ConstraintFailed: row-site mismatch / fragmented rows
+    ConstraintChecked --> ConstraintFailed: utilization or blockage issue
+
+    ConstraintFailed --> BoundaryReady: revise floorplan constraints
+```
+
+This state model prevents a flow from entering placement before the physical constraint model is sufficiently valid.
+
+---
+
+## 20. Common Failure Patterns
+
+| Failure pattern | Root cause | Detection report | Recommended response |
+|---|---|---|---|
+| IO pin unreachable | illegal layer or poor boundary placement | `io_pin_summary.rpt` | adjust pin layer/location |
+| Bus routes cross heavily | IO ordering mismatch | `io_order_check.rpt` | reorder pins or guide interface |
+| Macro channel too narrow | macros placed too close | `macro_channel_check.rpt` | increase spacing or rotate macro |
+| Macro pins congested | pins face crowded channel | `macro_summary.rpt` + congestion review | rotate macro or add channel |
+| Rows cross macro keepout | row generation before blockage cleanup | `row_site_summary.rpt` | cut rows around macro/halo |
+| Short row fragments | excessive blockage or macro fragmentation | `row_fragment_check.rpt` | remove fragments or adjust constraints |
+| Placement utilization too high | available row area overestimated | `placement_area_summary.rpt` | increase core area or reduce blockage |
+| Legalization degrades timing | row fragments force displacement | row + placement reports | improve row continuity |
+
+These failures often look like placement or routing failures, but their root cause is floorplan constraint modeling.
+
+---
+
+## 21. Demo 14: What It Should Validate
+
+The `LAY-BE-14_io_macro_row` demo should not try to implement a complex industrial block. Its goal is to validate the physical constraint model.
+
+The demo should answer:
+
+```text
+Can the flow identify top-level IO ports?
+Can it summarize IO direction and boundary intent?
+Can it model macro-like large objects or macro constraints?
+Can it generate or inspect rows and sites?
+Can it detect row/blockage inconsistencies?
+Can it calculate available placement area?
+Can it write constraint consistency reports?
+```
+
+Suggested inputs:
+
+```text
+minimal Verilog / LEF / Liberty
+floorplan configuration
+IO constraint configuration
+macro placement configuration
+row/site configuration
+```
+
+Suggested outputs:
+
+```text
+reports/io_macro_row_precheck.rpt
+reports/io_pin_summary.rpt
+reports/macro_constraint_summary.rpt
+reports/row_site_summary.rpt
+reports/placement_area_summary.rpt
+reports/constraint_consistency.rpt
+logs/LAY-BE-14_io_macro_row.log
+logs/LAY-BE-14_io_macro_row.cmd.log
+logs/LAY-BE-14_io_macro_row.sum.log
+```
+
+The demo is successful when it makes IO / macro / row constraints visible, reportable, and reviewable.
+
+---
+
+## 22. Example Repository Structure
+
+A practical demo structure can be:
 
 ```text
 LAY-BE-14_io_macro_row/
-  README.md
-  config/
-    env.csh
-    design_config.tcl
-  data/
-    README.md
-  scripts/
-    run_demo.csh
-  tcl/
-    run_demo.tcl
-    precheck.tcl
-    report_utils.tcl
-  logs/
-  reports/
-  output/
-  tmp/
+├─ README.md
+├─ data/
+│  ├─ netlist/
+│  │  └─ demo_top.v
+│  ├─ lef/
+│  │  └─ demo_stdcell.lef
+│  ├─ liberty/
+│  │  └─ demo_stdcell.lib
+│  └─ config/
+│     ├─ floorplan_config.tcl
+│     ├─ io_constraints.tcl
+│     ├─ macro_constraints.tcl
+│     └─ row_site_config.tcl
+├─ scripts/
+│  ├─ run_demo.csh
+│  └─ clean.csh
+├─ tcl/
+│  ├─ 01_precheck_inputs.tcl
+│  ├─ 02_load_design_context.tcl
+│  ├─ 03_report_io_model.tcl
+│  ├─ 04_report_macro_model.tcl
+│  ├─ 05_report_row_site_model.tcl
+│  ├─ 06_check_constraint_consistency.tcl
+│  └─ 07_write_stage_summary.tcl
+├─ logs/
+└─ reports/
 ```
 
-The demo should produce at least three categories of output:
+This structure keeps constraint loading, object reporting, and consistency checking separate.
+
+---
+
+## 23. Methodology: Define the Space Before Solving the Placement
+
+The most important methodology is:
 
 ```text
-1. A main report describing the stage result.
-2. A check report describing whether expected objects and files exist.
-3. A log summary that separates warnings, errors, and important state messages.
+define the physical space before optimizing objects inside it.
 ```
 
-The purpose is not to mimic a full production chip flow. The purpose is to build a minimal, inspectable engineering unit that demonstrates the principle.
-
-## 6. What to Check in Reports
-
-A useful report should be written for humans first and scripts second. It should make the stage decision visible: what was checked, what passed, what failed, and what should be reviewed before continuing.
-
-For this topic, the report should include:
-
-- `I/O side and order`
-- `macro overlap and orientation`
-- `macro-to-boundary spacing`
-- `row fragmentation`
-- `available standard-cell area`
-
-A recommended report skeleton is:
+That means:
 
 ```text
-# Stage Report
-Generated: <timestamp>
-Demo: LAY-BE-14_io_macro_row
-
-## Input Summary
-- design files
-- technology/library files
-- constraint files
-- configuration variables
-
-## Object Summary
-- object class
-- count
-- key properties
-- suspicious empty collections
-
-## Stage Result
-- executed operations
-- pass/fail status
-- warnings/errors
-
-## Next-Stage Gate
-- ready: yes/no
-- reason
-- required fixes
+IO pins should represent interface intent.
+Macros should define large-object topology.
+Rows should represent legal cell placement space.
+Blockages and halos should be included in usable area calculation.
+Reports should confirm that the space is valid before placement.
 ```
 
-The next-stage gate is important. Backend flow engineering is not only about producing a result; it is about deciding whether that result is safe to consume.
-
-## 7. Common Pitfalls
-
-The most common pitfalls are:
-
-- `I/O pins are placed without considering internal connectivity`
-- `macro pin access is ignored`
-- `rows are generated through blocked regions`
-- `standard cells are expected to solve a routing problem created by poor macro planning`
-
-Most of these problems come from treating the flow as a command recipe rather than a database engineering system. A command recipe may work once. A database-aware flow can be debugged, compared, and transferred.
-
-A useful debugging sequence is:
+This prevents a common anti-pattern:
 
 ```text
-1. Check whether the expected input files exist.
-2. Check whether the expected database objects were created.
-3. Check whether object counts match the assumption.
-4. Check whether the stage changed the expected objects.
-5. Check whether the reports describe the change clearly.
-6. Check whether the next stage can consume the result.
+run placement first
+discover congestion or legality issues
+guess parameters
+rerun repeatedly
 ```
 
-This sequence is slower than guessing, but it produces durable engineering knowledge.
-
-## 8. GitHub Documentation Style
-
-For GitHub, the article should be connected with executable artifacts. A good repository page should not be only a theory note and should not be only a script dump. It should connect explanation, demo input, demo output, and engineering interpretation.
-
-A recommended GitHub layout is:
+A better pattern is:
 
 ```text
-docs/articles/14_io_macro_row.md
-examples/LAY-BE-14_io_macro_row/
-examples/LAY-BE-14_io_macro_row/README.md
-examples/LAY-BE-14_io_macro_row/reports/
+review physical constraints
+generate reports
+fix the search space
+then run placement
 ```
 
-The article explains why the stage matters. The example directory shows how the stage is represented as files and reports. The report directory shows what the user should inspect after a run.
+Backend tools are powerful, but they cannot compensate for a poorly defined problem forever.
 
-This separation is useful because backend work has two audiences:
+---
+
+## 24. Summary
+
+IO, macro, and row are not minor floorplan details.
+
+They define the physical search space for backend implementation.
 
 ```text
-- readers who want to understand the method;
-- engineers who want to reproduce the run.
+IO defines how the design connects to the outside world.
+Macro defines large occupied regions, blockages, channels, and connectivity anchors.
+Row defines the legal placement grid for standard cells.
 ```
 
-## 9. Engineering Takeaways
-
-The central takeaway is:
-
-> The backend problem is not solved in an empty plane; I/O pins, macros, and rows define the feasible search space before optimization begins.
-
-A backend flow becomes reliable when each stage has a clear state model, clear input assumptions, clear object queries, clear reports, and clear next-stage gates. The more complex the design becomes, the less effective ad-hoc scripting becomes. What scales is not command memorization; what scales is a structured engineering method.
-
-For this topic, the practical rules are:
+Together, they determine:
 
 ```text
-- understand the database objects before editing them;
-- check feasibility before judging quality;
-- write reports that explain the stage state;
-- compare runs through stable output files;
-- treat the demo as a small but complete engineering unit.
+where cells can be placed
+where cells cannot be placed
+where routes can pass
+where congestion is likely
+where timing paths become long
+where power connections are feasible
+where ECO repair space remains available
 ```
 
-A EDA tool can execute commands, but engineering judgment comes from how we model the state, inspect the result, and preserve the reasoning path from input to output.
+Placement and routing quality depends heavily on this constraint model.
 
-## Architecture Deep Dive: What the Stage Really Owns
+A mature backend flow should therefore treat IO / Macro / Row as a formal, reportable stage with precheck, consistency reports, and clear placement-readiness criteria.
 
-This stage owns **physical constraint composition before detailed placement**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
+---
 
-The main architectural objects for this stage are:
+## Closing Note
 
-```text
-IO guides, macro placement, rows, sites, orientations, halos, channels, pin access
-```
+IO, macro, and row appear to be three floorplan objects.
 
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
+At the engineering level, they are the boundary conditions of backend optimization.
 
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
-
-```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
-```
-
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
-
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
-
-## Methodology Playbook
-
-For this topic, the recommended methodology is:
-
-```text
-co-design IO and macro locations; protect channels; verify row continuity and site compatibility
-```
-
-This methodology can be applied at three levels.
-
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
-
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
-
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
-
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
-
-## Design Review Questions
-
-Before accepting this stage as healthy, review the following question:
-
-> Can standard cells, macros, IOs, and routing resources coexist without hidden conflicts?
-
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
-
-A reviewer should also ask:
-
-```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
-```
-
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
+If the boundary conditions are unclear, downstream results may be legal but unstable, difficult to explain, and hard to improve.
