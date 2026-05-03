@@ -1,4 +1,4 @@
-# GitHub Backend Flow Articles 01-28
+# Backend Flow Articles
 
 Author: Darren H. Chen
 
