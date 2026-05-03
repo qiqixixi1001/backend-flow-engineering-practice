@@ -1,236 +1,690 @@
-# 04. From Log to Command Log: How to Preserve a Replayable Engineering Session
+# 04. From log to cmd_log: Building a Replayable Backend Engineering Session
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-04_log_cmdlog_replay**  
-> Tags: Backend Flow, EDA, Log, Command Log, Replay, Debug, Flow Engineering
+Author: Darren H. Chen  
+Demo: `LAY-BE-04_log_cmdlog_replay`  
+Tags: `Backend Flow` `EDA` `Log System` `Command Log` `Replay` `Tcl` `Debug Infrastructure` `Engineering Evidence`
 
-A backend run is only useful after failure if it leaves enough evidence. The main log records what the tool said. The command log records what the tool was asked to do. A summary report records the high-level stage result. These files serve different purposes, and a mature flow must preserve all of them.
+In backend implementation, a successful run is not only a set of generated output files. It is also an engineering event that must be explained, reviewed, compared, and reconstructed later.
 
-Without a command record, a long main log can become a maze. Without a main log, a command list cannot explain warnings, errors, or engine decisions. Without a summary, engineers must repeatedly scan large logs to understand the stage result. A replayable engineering session is built by connecting these evidence streams.
+A backend flow may run for minutes, hours, or even days. It may pass through design import, library setup, timing constraint loading, floorplan construction, placement, clock construction, routing, engineering change, physical verification handoff, and final export. During that process, the design database changes many times. Tool parameters may be updated. Intermediate reports may be generated. Warnings may appear long before the final error. Some commands may be issued from scripts, some from the interactive shell, and some from GUI operations translated into tool commands.
 
-A backend flow is not only a command sequence. It is a state transition system. Each stage starts from an input state, applies a controlled operation, and leaves an output state for the next stage. The quality of the whole flow depends on whether these state transitions are explicit, observable, and reviewable.
+If the run fails and the only thing left is a final error message, the engineering session has already lost most of its value.
 
-## 1. Conceptual Model
+A mature backend flow must preserve the engineering scene.
 
-The concept is simple: every backend run should be reconstructable. Reconstruction does not always mean re-executing every command successfully. It means that another engineer can understand the order of actions, the reported messages, the generated outputs, and the point of failure.
-
-Log evidence has different levels of detail. The main log is a narrative. The command log is a procedure trace. The summary is an index. A crash or error log, when present, is a failure microscope. The report directory is the structured outcome of the stage. Together they define the run history.
-
-A useful way to reason about the stage is:
+That scene is usually reconstructed from several layers of runtime evidence:
 
 ```text
-inputs + assumptions
-        |
-        v
-controlled EDA tool operation
-        |
-        v
-observable state + reports + next-stage readiness
+main log
+command log
+summary log
+standard output / standard error
+stage reports
+runtime manifest
+input file manifest
+checkpoint or database snapshot
 ```
 
-This model prevents a common mistake: judging a backend stage only by whether a command returned without a fatal error. A clean return is useful, but it is not sufficient. The stage must also leave enough evidence to prove that the expected state was created.
+The purpose of this article is to explain why `log` and `cmd_log` should be treated as core backend flow infrastructure, not as optional debug files.
 
-## 2. Backend Architecture View
+---
 
-The logging architecture should be planned before any stage runs. Standard output and standard error should be captured separately or in a clearly named file. The main log should be tool-generated. The command log should be preserved as an input to replay. Summary files should be short and stable. Stage reports should be deterministic enough for comparison.
+## 1. A Backend Run Is a State Transition, Not a Linear Text Execution
 
-A useful architecture is: launcher creates run directory, tool writes main log and command log, Tcl stage writes structured reports, wrapper writes exit status, and a post-run checker extracts warnings and errors into a compact review file.
-
-A generic architecture view is:
+A simple script may look linear:
 
 ```text
-[launcher / Tcl entry]
-        |
-        v
-[configuration and precheck layer]
-        |
-        v
-[backend database or runtime context]
-        |
-        v
-[stage-specific engine]
-        |
-        v
-[reports, logs, and state checks]
+source setup.tcl
+read design
+link design
+run placement
+report result
 ```
 
-The important engineering principle is separation of responsibility. The launcher should not hide design assumptions. The configuration layer should not silently change database state. The stage engine should not be treated as a black box without reports. The report layer should not rely only on human memory.
+But the actual tool session is not just a linear text execution. It is a sequence of state transitions.
 
-## 3. Engineering Methodology
+At the beginning, there is no loaded design database. After libraries are loaded, the project library state changes. After a netlist is imported, the logical design graph exists. After linking, logical instances are bound to library cells. After floorplan creation, the physical canvas exists. After placement, cells have legal or illegal locations. After routing, nets acquire physical shapes and parasitic effects.
 
-The recommended methodology is to move from visibility to control. Visibility means the flow can show its inputs, state, actions, and outputs. Control means the flow can reject unsafe conditions before they damage the run state. In backend engineering, visibility without control creates long logs but weak reliability. Control without visibility creates rigid scripts that are difficult to debug. A mature flow needs both.
-
-The practical sequence is:
+Therefore, each meaningful command should be understood as a transition:
 
 ```text
-precheck -> execute stage -> query state -> write reports -> review gate -> next stage
+State_n + Command_n -> State_n+1 + Messages_n + Reports_n
 ```
 
-The precheck phase validates assumptions. The execution phase performs the intended state transition. The query phase inspects the database or runtime state. The report phase converts internal state into durable evidence. The review gate decides whether the next stage is allowed to proceed.
-
-This methodology is intentionally conservative. Backend stages are highly coupled. A weak assumption in an early stage can become a timing, routing, physical verification, or ECO problem much later. The earlier the flow records and checks state, the cheaper debugging becomes.
-
-For this article, the most important working rules are:
+A backend log system should preserve enough information to answer three questions:
 
 ```text
-1. Make hidden assumptions visible.
-2. Convert every critical state into a reportable fact.
-3. Separate setup, execution, query, and review.
-4. Treat warnings as engineering signals, not background noise.
-5. Keep the demo small enough to understand and strict enough to be useful.
+What was the previous state?
+What command or operation caused the transition?
+What evidence shows the new state?
 ```
 
-This is also the reason each demo in this series is designed to be independent. A demo should carry its own configuration, scripts, sample data where needed, logs, reports, temporary directory, and README files. Independence makes the example easier to review and prevents one demo from silently depending on the side effects of another.
+Without this, the flow may still "run", but the run is not inspectable.
 
-## 4. Data Model and Object Relationships
+---
 
-The data model is a timeline. Each command is an event. Each warning or error is a message attached to a point in the timeline. Each report is an artifact generated after a set of events. Each output database is a state checkpoint.
+## 2. The Four-Layer Runtime Record Model
 
-A replay plan can be derived by aligning command records and log messages. This does not require exposing proprietary design data. Even a small demo can show how a command sequence, error extraction, and report index are linked.
+A single log file is not enough for a serious backend flow. Different record types solve different engineering problems.
 
-A practical debugging question is:
+| Record layer | Primary question answered | Typical content | Engineering role |
+|---|---|---|---|
+| `stdout.log` / `stderr.log` | What did the process print to the terminal? | terminal output, shell redirection, uncaught messages | process-level evidence |
+| `main.log` | What happened inside the tool session? | initialization, warnings, errors, progress, runtime messages | diagnostic trace |
+| `cmd.log` | What command sequence was executed? | Tcl commands, interactive commands, sourced commands | replay trace |
+| `summary.log` | What is the quick status of this run? | stage status, pass/fail count, key warnings, elapsed time | review entry point |
+| stage reports | What did the design look like at each checkpoint? | timing, utilization, placement, routing, DRC, QoR | design-state evidence |
+| manifest files | What inputs and environment produced the run? | file paths, checksums, tool version, variables | reproducibility evidence |
 
-```text
-Which state did this stage promise to create, and which report proves that it was created?
+The key point is that these files are not redundant. They are complementary.
+
+A large `main.log` may tell you that an error occurred, but it may not provide a clean command sequence for replay. A `cmd.log` may provide the command sequence, but it may not show all warnings, timing summaries, or internal tool messages. A `summary.log` may quickly tell you which stage failed, but it cannot replace the full diagnostic trace.
+
+A backend engineering flow should therefore be designed around layered runtime evidence.
+
+---
+
+## 3. Runtime Record Architecture
+
+A backend tool session can be viewed as a runtime evidence generator.
+
+```mermaid
+flowchart TD
+    A[Shell Wrapper] --> B[EDA Tool Invocation]
+    B --> C[Tool Startup]
+    C --> D[Initialization Scripts]
+    D --> E[Tcl Command Interpreter]
+    E --> F[Design Database]
+    E --> G[Algorithm Engines]
+    G --> F
+    F --> H[Reports and Exports]
+
+    C --> L1[stdout / stderr Capture]
+    D --> L2[Main Log]
+    E --> L3[Command Log]
+    G --> L2
+    H --> L4[Stage Reports]
+    L2 --> S[Summary Log]
+    L3 --> R[Replay Package]
+    L4 --> R
+    S --> R
+    L1 --> R
 ```
 
-When this question cannot be answered, the flow is not yet engineered. It may still run, but it is not ready to be used as a repeatable technical asset.
+The log architecture should not be added after the flow is already complicated. It should be present from the first runnable demo.
 
-## 5. Demo Design
-
-The paired demo is:
+A good backend run wrapper should answer:
 
 ```text
-LAY-BE-04_log_cmdlog_replay
+Where is the main log?
+Where is the command log?
+Where is the summary?
+Where are stage reports written?
+Where is stdout captured?
+Where is the temporary directory?
+Where is the run manifest?
 ```
 
-The demo should be self-contained. It should use a local directory structure, local configuration, local Tcl entry point, local logs, local reports, and local output directories. It should not depend on files generated by another demo. The purpose is to make the stage understandable from the directory alone.
+If these answers are implicit, the flow is not yet engineering-grade.
 
-A recommended directory structure is:
+---
+
+## 4. Why the Main Log Exists
+
+The main log is the event trace of the tool session.
+
+It usually records:
 
 ```text
-LAY-BE-04_log_cmdlog_replay/
+tool startup messages
+license checkout messages
+environment and initialization messages
+command execution traces
+warnings and errors
+stage progress
+runtime statistics
+internal engine messages
+report generation messages
+database save/load messages
+exit status
+```
+
+The main log is the first place to inspect when a run fails. However, it is also easy for the main log to become too large. For this reason, it should be structured with stage markers.
+
+A practical pattern is:
+
+```text
+[STAGE_BEGIN] 00_runtime_probe
+...
+[STAGE_END]   00_runtime_probe status=PASS elapsed=00:00:03
+
+[STAGE_BEGIN] 01_init
+...
+[STAGE_END]   01_init status=PASS elapsed=00:00:12
+
+[STAGE_BEGIN] 02_import
+...
+[STAGE_END]   02_import status=FAIL elapsed=00:01:05
+```
+
+This makes the log searchable and reviewable.
+
+---
+
+## 5. Why the Command Log Exists
+
+The command log answers a different question:
+
+```text
+What commands did the tool actually execute?
+```
+
+This is not always the same as "what the top-level script contains".
+
+A real session may include:
+
+```text
+commands from the main script
+commands from sourced scripts
+commands created by procedures
+commands typed interactively
+commands generated by GUI operations
+commands issued by helper scripts
+commands executed after variable expansion
+```
+
+Therefore, the command log is closer to the actual operational trace than the source script alone.
+
+A command log is useful for:
+
+```text
+replaying a session
+extracting minimal reproduction steps
+comparing two sessions
+building regression tests
+auditing unexpected interactive changes
+debugging GUI-to-command behavior
+```
+
+However, a command log is not automatically a complete replay package. It is one critical component of the package.
+
+---
+
+## 6. log vs cmd_log vs report
+
+The distinction is important enough to formalize.
+
+| File type | Best at | Weak at | Typical review method |
+|---|---|---|---|
+| `main.log` | understanding what happened | clean replay | search for `ERROR`, `WARNING`, stage markers |
+| `cmd.log` | reconstructing command sequence | explaining internal messages | inspect command order and parameters |
+| `summary.log` | fast pass/fail review | detailed diagnosis | read top-down |
+| report files | understanding design state | reconstructing command history | compare stage by stage |
+| manifest files | reproducing run context | explaining design QoR | compare paths, versions, checksums |
+
+A mature backend flow does not choose one of them. It uses all of them.
+
+---
+
+## 7. Replay Is Not Just Sourcing a cmd_log
+
+A common misunderstanding is:
+
+```text
+If I have cmd.log, I can replay the run.
+```
+
+This is only partially true.
+
+A command sequence can only be replayed correctly when the surrounding state is also reconstructed. That state includes:
+
+```text
+tool binary
+tool version
+working directory
+environment variables
+license environment
+HOME-related startup behavior
+initialization scripts
+input files
+technology files
+library files
+constraints
+database checkpoints
+temporary directory isolation
+runtime parameters
+random seed or deterministic settings
+```
+
+A more accurate replay model is:
+
+```text
+Replay = CommandSequence + InitialState + InputData + RuntimeContext + ToolVersion
+```
+
+The command log provides the command sequence. It does not, by itself, provide the initial state.
+
+This is why Demo 04 should not only parse a command log. It should also produce a replay plan.
+
+---
+
+## 8. Replay State Machine
+
+A replayable engineering session can be represented as a state machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Captured
+    Captured --> Classified: split log / cmd_log / reports
+    Classified --> Normalized: remove noise / identify stages
+    Normalized --> Reconstructed: build replay plan
+    Reconstructed --> Replayed: execute in controlled runtime
+    Replayed --> Compared: compare reports and logs
+    Compared --> Accepted: equivalent evidence
+    Compared --> Investigate: mismatch found
+    Investigate --> Normalized: refine replay package
+    Accepted --> [*]
+```
+
+This model highlights an important point:
+
+Replay is an iterative engineering process. The first replay attempt may fail because a hidden state was missing. The response should not be random debugging. The response should be to identify which state dimension was not captured.
+
+---
+
+## 9. The Session Evidence Graph
+
+The relationship between log files and design evidence can be modeled as a graph.
+
+```mermaid
+flowchart LR
+    A[run wrapper] --> B[tool invocation]
+    B --> C[init scripts]
+    C --> D[command stream]
+    D --> E[design database state]
+    E --> F[stage reports]
+    E --> G[exports]
+    D --> H[cmd.log]
+    B --> I[stdout.log]
+    C --> J[main.log]
+    D --> J
+    E --> J
+    F --> K[summary.log]
+    J --> K
+    H --> L[replay plan]
+    I --> L
+    J --> L
+    F --> L
+    G --> L
+```
+
+This graph is useful because it prevents a narrow view of replay. A replay package is not just one file. It is a connected set of evidence files.
+
+---
+
+## 10. What Should Be Logged at Stage Boundaries
+
+Every backend stage should leave a small but structured record.
+
+| Stage boundary field | Example | Purpose |
+|---|---|---|
+| stage name | `design_import` | identify flow phase |
+| start time | `2026-04-27 02:10:00` | runtime tracking |
+| end time | `2026-04-27 02:11:21` | elapsed time calculation |
+| input files | `top.v`, `std.lib`, `tech.lef` | reproduce stage |
+| output files | `import.rpt`, `link.rpt` | locate evidence |
+| warning count | `12` | fast risk review |
+| error count | `0` | pass/fail gate |
+| database checkpoint | `db/import_done` | restart point |
+| command source | `tcl/import.tcl` | traceability |
+| status | `PASS` / `FAIL` | summary decision |
+
+A backend flow without stage boundary records is hard to debug because the reviewer must manually infer where one phase ended and the next began.
+
+---
+
+## 11. Error and Warning Classification
+
+Not all warnings are equal. A useful log system should classify messages by engineering impact.
+
+| Class | Meaning | Example impact | Review action |
+|---|---|---|---|
+| Fatal error | run cannot continue | parser failure, missing required file | stop and fix |
+| Stage error | current stage failed | import failure, link failure, routing failure | inspect stage log |
+| Data warning | input accepted but suspicious | missing physical view, unmatched instance | check data consistency |
+| QoR warning | run finished but quality is risky | high utilization, high congestion | review reports |
+| Environment warning | runtime context may be unstable | missing variable, fallback path | fix wrapper |
+| License warning | license behavior affects run | waiting, reduced feature | review license setup |
+| Noise warning | informational or known benign | repeated display messages | filter after confirmation |
+
+The summary log should not merely count all warnings. It should help the engineer decide which warnings matter.
+
+---
+
+## 12. Command Log Normalization
+
+A raw command log is often not suitable for direct reuse. It may contain:
+
+```text
+absolute paths
+temporary paths
+machine-specific paths
+GUI-only commands
+interactive selection commands
+timestamps
+viewer operations
+debug-only commands
+duplicated commands
+commands generated by experiments
+```
+
+Before using it as a replay source, it should be normalized.
+
+A normalized command log should separate:
+
+```text
+required commands
+optional review commands
+GUI-only commands
+diagnostic commands
+unsafe commands
+environment-specific commands
+```
+
+A practical replay plan may look like this:
+
+```text
+01_required_init.tcl
+02_required_import.tcl
+03_required_link.tcl
+04_optional_reports.tcl
+05_diagnostic_queries.tcl
+99_excluded_gui_only.tcl
+```
+
+This structure is much more useful than blindly sourcing a raw command log.
+
+---
+
+## 13. Replay Package Design
+
+A replay package should be self-describing.
+
+```text
+replay/
   README.md
-  README.zh-CN.md
-  config/
-  scripts/
-  tcl/
-  data/
+  manifest/
+    runtime_manifest.txt
+    input_manifest.txt
+    tool_manifest.txt
+    report_manifest.txt
   logs/
+    run.stdout.log
+    run.log
+    run.cmd.log
+    run.sum.log
+  tcl/
+    replay_required.tcl
+    replay_reports.tcl
+    replay_diagnostics.tcl
   reports/
-  tmp/
-  output/
+    original/
+    replayed/
+  diff/
+    report_diff_summary.txt
 ```
 
-The demo should not try to be a production tapeout flow. It should be a minimal engineering microscope. It should expose one concept clearly, generate stable reports, and make the difference between success, warning, and failure visible.
-
-The demo should produce at least three categories of evidence:
+The replay package should answer:
 
 ```text
-1. Input evidence: what files, variables, and assumptions were used.
-2. State evidence: what runtime or database state was created.
-3. Review evidence: what report should be inspected before moving on.
+How was the original run launched?
+Which commands must be replayed?
+Which files are required?
+Which reports define equivalence?
+Which differences are acceptable?
+Which differences require investigation?
 ```
 
-## 6. What to Check in Reports
+This moves replay from a manual activity to an engineering procedure.
 
-For this stage, the report checklist should include:
+---
 
-- Main log exists and is non-empty.
-- Command log or command trace exists.
-- Summary report captures stage start, stage end, and status.
-- Warnings and errors are extracted into a review file.
-- Replay instructions identify the original script entry point.
+## 14. Report Comparison Is Part of Replay
 
-The strongest reports are compact and explicit. They should be short enough to read quickly, but structured enough to support comparison across runs. A report that only says "done" is not useful. A report that names the checked assumptions and records pass or fail status is useful.
+A run is not replayed just because the replay script completes.
 
-A good report also distinguishes between missing inputs, unsupported commands, empty object collections, and real design errors. These cases require different debugging actions.
+A replay should compare observable outputs.
 
-## 7. Common Pitfalls
-
-Common pitfalls include:
-
-- Only keeping the final report and deleting logs.
-- Mixing several runs into the same log directory.
-- Using timestamps in paths without a stable run manifest.
-- Ignoring warnings because the exit status is zero.
-- Trying to replay from a main log instead of a command trace.
-
-The deeper issue behind these pitfalls is state ambiguity. Backend problems become expensive when the engineer cannot tell whether the failure came from the design, the library, the tool context, the command interface, or the run environment. The purpose of the demo is to reduce that ambiguity.
-
-## 8. Engineering Takeaways
-
-The key takeaway is that backend flow quality comes from controlled state transitions, not from long scripts. A script is only one part of the system. The real system includes configuration, runtime context, design database, library context, constraints, reports, logs, and handoff artifacts.
-
-For this stage, the engineering discipline can be summarized as:
+Possible comparison targets include:
 
 ```text
-Do not only run the command.
-Define the expected state.
-Generate evidence for that state.
-Review the evidence before moving forward.
+stage pass/fail status
+warning and error counts
+number of loaded libraries
+number of design instances
+number of nets and ports
+timing summary
+utilization summary
+placement legality summary
+routing summary
+DRC summary
+export file existence
 ```
 
-This is the difference between a command sequence and a backend flow engineering practice. The former may work once. The latter can be reviewed, repeated, compared, debugged, and reused.
+Some outputs are expected to be identical. Some may differ because of runtime timestamps, host names, temporary file names, or nondeterministic ordering. A good comparison framework distinguishes between meaningful and non-meaningful differences.
 
-## Architecture Deep Dive: What the Stage Really Owns
+---
 
-This stage owns **engineering evidence captured in logs and command streams**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
+## 15. A Practical Debug Flow Using log and cmd_log
 
-The main architectural objects for this stage are:
+When a backend run fails, a structured debug flow is more effective than random inspection.
+
+```mermaid
+flowchart TD
+    A[Run Failed] --> B[Read summary log]
+    B --> C{Stage identified?}
+    C -- No --> D[Search main log for first ERROR / FATAL]
+    C -- Yes --> E[Open stage log section]
+    D --> E
+    E --> F[Inspect command around failure]
+    F --> G[Locate command in cmd.log]
+    G --> H[Build minimal replay script]
+    H --> I[Replay in clean runtime]
+    I --> J{Failure reproduced?}
+    J -- Yes --> K[Fix data / command / parameter]
+    J -- No --> L[Find missing state variable]
+    L --> M[Update manifest and replay context]
+    M --> I
+```
+
+This flow makes one principle explicit:
+
+If a failure cannot be reproduced, the missing piece is often not the command itself. It is one of the state variables around the command.
+
+---
+
+## 16. What Demo 04 Should Demonstrate
+
+Demo 04 is not intended to run a full physical implementation stage. Its purpose is to demonstrate runtime evidence handling.
+
+A good Demo 04 should perform the following actions:
 
 ```text
-main log, command log, summary log, redirected outputs, warning/error index, replay plan
+read a sample main log
+read a sample command log
+extract warning/error/failure lines
+identify command sequence
+classify command types
+generate a replay plan
+write a replay summary report
 ```
 
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
-
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
+The expected output can include:
 
 ```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
+reports/log_cmdlog_replay_plan.rpt
+reports/error_warning_extract.rpt
+reports/command_sequence.rpt
+reports/replay_readiness.rpt
 ```
 
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
-
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
-
-## Methodology Playbook
-
-For this topic, the recommended methodology is:
+The demo should help the reader understand:
 
 ```text
-capture human actions as command history; reduce logs into reviewable summaries; bind warnings to stage ownership
+what was captured
+what can be replayed
+what cannot be replayed directly
+what state information is still required
 ```
 
-This methodology can be applied at three levels.
+This is why Demo 04 belongs early in the backend flow series. Before handling large design databases, the engineering environment must first be able to preserve and replay tool sessions.
 
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
+---
 
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
+## 17. Example Replay Readiness Report
 
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
-
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
-
-## Design Review Questions
-
-Before accepting this stage as healthy, review the following question:
-
-> Can we reconstruct what happened without asking the original engineer?
-
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
-
-A reviewer should also ask:
+A useful replay readiness report may look like this:
 
 ```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
+# Replay Readiness Report
+
+Run ID                : LAY-BE-04
+Main log              : FOUND
+Command log           : FOUND
+Summary log           : FOUND
+Runtime manifest      : FOUND
+Input manifest        : FOUND
+
+Command count         : 37
+Required commands     : 18
+Diagnostic commands   : 11
+GUI-only commands     : 3
+Unsafe commands       : 1
+Unknown commands      : 4
+
+First error stage     : design_import
+First error command   : import_def ./data/top.def
+Replay status         : PARTIAL
+Missing state         : design database checkpoint before DEF import
+Recommended action    : add link-stage checkpoint and input file checksum
 ```
 
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
+This kind of report is more valuable than simply saying "replay failed". It tells the engineer what is missing.
+
+---
+
+## 18. Anti-Patterns
+
+Several common habits make backend sessions difficult to replay.
+
+| Anti-pattern | Why it is risky | Better pattern |
+|---|---|---|
+| only checking final reports | hides early warnings | review summary and first error |
+| using one giant log only | hard to replay | split log, command log, summary |
+| relying on GUI memory | not reproducible | capture command trace |
+| overwriting logs | loses history | unique run directories |
+| mixing multiple runs in one tmp directory | causes contamination | per-run tmp directory |
+| using raw absolute paths everywhere | reduces portability | use project-root variables |
+| ignoring command log | loses replay path | archive cmd.log with reports |
+| replaying without manifest | hidden state mismatch | record runtime and inputs |
+
+Avoiding these anti-patterns is often more important than adding more flow commands.
+
+---
+
+## 19. Recommended Directory Structure
+
+A simple but effective structure is:
+
+```text
+run/
+  2026-04-27_024112_LAY-BE-04/
+    logs/
+      run.stdout.log
+      run.log
+      run.cmd.log
+      run.sum.log
+    reports/
+      log_cmdlog_replay_plan.rpt
+      error_warning_extract.rpt
+      command_sequence.rpt
+      replay_readiness.rpt
+    manifest/
+      runtime_manifest.txt
+      input_manifest.txt
+      tool_manifest.txt
+    tmp/
+    replay/
+      replay_required.tcl
+      replay_reports.tcl
+```
+
+The timestamped run directory prevents overwriting. The separate subdirectories keep evidence organized. The replay directory keeps reconstructed commands separate from raw command logs.
+
+---
+
+## 20. Methodology: Evidence-Driven Backend Flow
+
+The underlying methodology can be summarized as:
+
+```text
+Do not trust a backend run unless it leaves evidence.
+Do not trust evidence unless it can be interpreted.
+Do not trust interpretation unless it can be replayed or compared.
+```
+
+This leads to a practical engineering rule:
+
+```text
+Every stage should produce:
+1. a command trace,
+2. a diagnostic trace,
+3. a summary,
+4. a design-state report,
+5. enough context for replay.
+```
+
+This methodology applies not only to early demos, but also to full-scale implementation work.
+
+---
+
+## 21. Engineering Checklist
+
+Before considering a backend run reproducible, check the following:
+
+```text
+[ ] Tool executable path is recorded.
+[ ] Tool version is recorded.
+[ ] Working directory is recorded.
+[ ] Environment variables are recorded or controlled.
+[ ] Startup scripts are explicit.
+[ ] Main log is generated.
+[ ] Command log is generated.
+[ ] Summary log is generated.
+[ ] stdout and stderr are captured.
+[ ] Stage reports are generated.
+[ ] Input files are listed.
+[ ] Important input files have checksums.
+[ ] Temporary directory is isolated.
+[ ] Run directory is not overwritten.
+[ ] Failure stage can be identified.
+[ ] First error can be located.
+[ ] Command around first error can be extracted.
+[ ] Replay plan can be generated.
+```
+
+The value of this checklist is not bureaucratic. It is the minimum engineering discipline required to make backend flow behavior explainable.
+
+---
+
+## 22. Conclusion
+
+The difference between a temporary backend run and an engineering-grade backend session is evidence.
+
+A temporary run may produce a result. An engineering-grade session produces a result plus enough context to explain how the result was produced.
+
+`main.log`, `cmd.log`, `summary.log`, reports, and manifests form the runtime evidence layer of a backend flow. The main log explains what happened. The command log preserves the command trajectory. The summary log compresses the review path. Reports capture design state. Manifests preserve the surrounding runtime context.
+
+Replay is not a single command. It is a method for reconstructing a session from its evidence.
+
+For backend engineering, this is not a secondary concern. It is one of the foundations of reliable flow development.
