@@ -1,353 +1,969 @@
 # 22. ECO: Why Backend Changes Must Preserve Logical, Physical, Timing, and Verification Consistency
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-22_eco**  
-> Tags: Backend Flow, ECO, Change Set, Spare Cell, Timing Closure, Verification
+**Author:** Darren H. Chen  
+**Direction:** Backend Flow / Physical Implementation / EDA Tool Engineering / ECO Closure  
+**Demo:** `LAY-BE-22_eco`  
+**Tags:** Backend Flow, EDA, ECO, Timing ECO, Metal-only ECO, Engineering Change Order, Physical Implementation, LEC, LVS, DRC, Timing Closure
 
-An ECO is a constrained change to an already structured implementation; the engineering problem is to apply the smallest safe modification while preserving consistency.
+---
 
-In a real backend project, the visible command line is only the surface. Under it, the tool is continuously converting text files, technology rules, design constraints, and physical edits into a typed implementation database. A robust flow is therefore built around three questions:
+## 1. ECO Is Not a Late-Stage Patch
 
-```text
-1. What design state is this stage supposed to create or refine?
-2. Which objects and relationships must be queried to verify that state?
-3. Which reports prove that the state is safe enough for the next stage?
-```
-
-The answer to those questions is the foundation of backend flow engineering.
-
-## 1. Conceptual Model
-
-The important point in this topic is that a backend step is never an isolated command. It is a state transition inside a larger physical implementation system. The input state contains design objects, library models, constraints, and previous physical decisions. The output state must be both usable by the next stage and explainable by reports.
-
-For this article, the most relevant objects are:
-
-- `change set`
-- `spare cell`
-- `target net`
-- `patch cell`
-- `fixed instance`
-- `timing path`
-- `verification point`
-- `layout delta`
-
-These objects are not just names. They are database entries with type, ownership, geometry, connectivity, timing, and sometimes manufacturing meaning. When a script manipulates them, it is manipulating the implementation state of the chip.
-
-A practical mental model is:
+In backend implementation, ECO is often described casually as a late-stage fix:
 
 ```text
-source files + constraints + technology context
-        |
-        v
-backend database objects
-        |
-        v
-stage-specific transformation
-        |
-        v
-reports + updated database + handoff data
+The design is almost done.
+A problem appears.
+Apply a small patch.
+Continue signoff.
 ```
 
-This model is simple, but it prevents a common mistake: treating a backend flow as a sequence of text commands. A mature flow treats every stage as a controlled transition from one database state to another.
+That view is too shallow.
 
-## 2. Backend Architecture View
-
-A EDA tool usually exposes the stage through Tcl or another command interface. However, the real architecture is layered. A command is parsed, resolved against the current database, checked against technology and design rules, executed by an internal engine, and finally reflected in logs, reports, and updated design objects.
-
-For this topic, a useful architecture decomposition is:
-
-- `change intake layer`
-- `logical patch engine`
-- `physical patch planner`
-- `timing evaluator`
-- `verification checkpoint`
-- `rollback manager`
-
-The flow can be visualized as:
+An ECO is not just a patch. It is a constrained engineering change applied to a design state that is already partially or mostly closed. At this stage, the design database may already contain:
 
 ```text
-      [change intake layer]
-              |
-              v
-      [logical patch engine]
-              |
-              v
-      [physical patch planner]
-              |
-              v
-      [timing evaluator]
-              |
-              v
-      [verification checkpoint]
-              |
-              v
-      [rollback manager]
+linked logical netlist
+placed standard cells
+macro placement
+clock tree structure
+routed signal nets
+power network
+fillers / taps / decaps / spare cells
+extracted parasitics
+signoff reports
+verification baselines
 ```
 
-This architecture view matters because many backend issues are not caused by a single bad command. They are caused by a mismatch between layers. For example, a script may request a legal operation, but the database context is incomplete. A file may be syntactically valid, but the objects created from it do not match the assumptions of the next stage. A report may look clean, but only because the relevant object collection was empty.
+Changing one piece of this state may affect many others. A new buffer changes physical placement, routing, parasitic load, timing, power, DRC, LVS, and sometimes equivalence checking. A metal-only reconnection changes route topology, extraction, LVS, antenna behavior, and timing. A functional ECO changes the expected logical behavior, which changes the equivalence target.
 
-Therefore, a GitHub demo should not only run a command. It should also show the layer boundaries: configuration, database input, stage execution, report generation, and verification checks.
-
-## 3. Engineering Methodology
-
-The recommended methodology is to move from feasibility to quality. Feasibility asks whether the required objects, constraints, and database context exist. Quality asks whether the result is good enough. Mixing these two questions is a common source of confusion.
-
-For this stage, the working rules are:
-
-- `classify ECO type before editing`
-- `keep every modification in a change set`
-- `prefer local physical impact`
-- `verify timing and connectivity after each patch`
-- `make rollback possible`
-
-The general methodology is:
+The real problem is therefore not simply:
 
 ```text
-Precheck  ->  Stage execution  ->  State query  ->  Report  ->  Comparison  ->  Next-stage gate
+Can the change be applied?
 ```
 
-The precheck phase should verify that all required inputs and assumptions exist. The execution phase should be as deterministic as possible. The query phase should inspect the database rather than relying only on log text. The report phase should write stable files that can be compared across runs. The gate phase should decide whether the next stage is allowed to proceed.
-
-This is especially important for GitHub-style examples. A demo that only prints a successful run log is weak evidence. A demo that prints object counts, state checks, and report summaries is much stronger.
-
-## 4. Data Model and Object Relationships
-
-The data model behind this topic can be understood as a graph. Objects are nodes. Connectivity, hierarchy, geometry, timing arcs, rule references, and ownership are edges. The EDA tool does not operate on a flat list; it operates on a structured graph with many views.
-
-A simplified view is:
+The real problem is:
 
 ```text
-logical hierarchy ---- owns ---- instances / modules
-        |                         |
-        |                         v
-        |                    pins / ports ---- connect ---- nets
-        |                         |                         |
-        v                         v                         v
-constraints              timing arcs / checks          physical routes
-        |                         |                         |
-        v                         v                         v
-reports                  timing paths                  DRC / PV results
+After the change, do logical function, physical implementation, timing behavior,
+and verification evidence still describe the same design?
 ```
 
-The most important engineering implication is that every stage must preserve cross-view consistency. A physical change may affect timing. A timing fix may affect routing. A routing fix may affect physical verification. A low-power or hierarchical constraint may affect all of them.
+That is why ECO is one of the most engineering-sensitive stages in a backend flow.
 
-The right way to debug is not to ask only, "Which command failed?" The better question is:
+---
+
+## 2. The Core Definition: ECO Under Freeze Constraints
+
+A normal implementation stage has relatively high freedom. Placement can move many cells. Routing can rebuild many wires. Optimization can resize or insert many buffers. Timing closure can modify many parts of the design.
+
+ECO happens under much stronger freeze constraints.
+
+At ECO time, many parts of the design should remain stable:
 
 ```text
-Which view of the design became inconsistent with another view?
+floorplan should not be reopened unless necessary
+macro placement should remain unchanged
+power structure should remain stable
+clock tree should not be rebuilt unless required
+already clean routing should not be disturbed widely
+already closed timing should not regress globally
+already passed PV regions should not be reopened unnecessarily
+already verified logic should remain traceable
 ```
 
-## 5. Demo Design
-
-The paired demo is:
+So ECO is best modeled as:
 
 ```text
-LAY-BE-22_eco
+ECO = Controlled Delta(Base Design State, Change Request, Freeze Constraints)
 ```
 
-The demo should be self-contained. It should use a local directory structure, local sample data where possible, local Tcl scripts, local report files, and a local run manifest. It should not depend on files from another demo. This makes the example easy to copy, review, and rerun.
+The goal is not maximum optimization freedom. The goal is a minimal, explainable, verifiable delta.
 
-A recommended directory structure is:
+A useful mental model is:
+
+```mermaid
+flowchart TD
+    A[Base Design State] --> D[ECO Decision]
+    B[Change Request] --> D
+    C[Freeze Constraints] --> D
+
+    D --> E[Logical Delta]
+    D --> F[Physical Delta]
+    D --> G[Timing Delta]
+    D --> H[Verification Delta]
+
+    E --> I[Patched Design State]
+    F --> I
+    G --> I
+    H --> I
+
+    I --> J[Re-check Closure]
+    J --> K{Clean?}
+    K -->|Yes| L[Archive ECO Evidence]
+    K -->|No| M[Refine / Roll Back / Reclassify]
+```
+
+This diagram captures the essential ECO principle: an ECO is not only a command sequence. It is a controlled transition from one design state to another.
+
+---
+
+## 3. Why ECO Cannot Be Viewed as Netlist Editing Only
+
+A functional ECO often starts from a logical change:
+
+```text
+add a condition
+invert a control signal
+change a mux select
+patch a reset path
+add a gate-level correction
+replace one expression with another
+```
+
+It is tempting to think that once the netlist is modified, the ECO is done.
+
+In backend implementation, that is false.
+
+A netlist cell has multiple meanings after implementation:
+
+```text
+logical node
+library cell instance
+physical object
+placed object
+routed object
+timing object
+power object
+verification object
+```
+
+A net has multiple meanings too:
+
+```text
+logical connection
+routed wire topology
+parasitic RC network
+coupling environment
+antenna-related conductor
+LVS connectivity object
+timing propagation object
+```
+
+If the netlist changes but the physical database is not updated, the design becomes inconsistent:
+
+```text
+new logic exists in source, but not in layout
+new connection exists logically, but route still follows old topology
+STA graph may not match the patched implementation
+LVS may report mismatch
+LEC may compare against the wrong reference
+PEX may extract parasitics for the wrong connectivity
+```
+
+Therefore, ECO must be treated as a multi-view database update, not as text editing.
+
+---
+
+## 4. The Four Consistency Domains of ECO
+
+Every ECO should be checked against four domains.
+
+| Domain | What Must Stay Consistent | Typical Evidence |
+|---|---|---|
+| Logical consistency | patched netlist matches intended function | LEC / formal comparison / netlist delta |
+| Physical consistency | placed/routed database matches patched netlist | DEF/GDS update, LVS, DRC |
+| Timing consistency | setup/hold/slew/cap remain acceptable | STA reports, timing delta, path summaries |
+| Verification consistency | all required checks refer to the same design revision | manifest, reports, signoff checklist |
+
+The difficulty is that these domains are coupled.
+
+For example:
+
+```text
+logical ECO adds a cell
+  -> physical placement needed
+  -> routing repair needed
+  -> parasitics change
+  -> timing changes
+  -> LVS and LEC targets change
+```
+
+Another example:
+
+```text
+timing ECO inserts delay buffer
+  -> hold improves
+  -> setup may degrade
+  -> area/power increases
+  -> routing changes
+  -> DRC may change
+```
+
+A mature ECO flow must make these dependencies visible.
+
+---
+
+## 5. Main ECO Types
+
+ECO can be classified by the intent of the change and by the physical layers allowed to change.
+
+### 5.1 Functional ECO
+
+A functional ECO changes the intended logic behavior.
+
+Typical examples:
+
+```text
+add an enable condition
+fix an incorrect control signal
+change mux selection
+insert missing inversion
+patch reset or scan control
+add small corrective logic
+```
+
+Primary risks:
+
+```text
+wrong reference design for equivalence checking
+new cells without legal placement
+new connections without route repair
+timing regression from added logic
+LVS mismatch if physical update is incomplete
+```
+
+Key checks:
+
+```text
+new reference vs patched implementation
+logical delta review
+placement legality
+route repair
+setup/hold recheck
+LVS / DRC recheck
+```
+
+### 5.2 Timing ECO
+
+A timing ECO changes implementation to fix setup, hold, slew, capacitance, or transition issues without changing intended logic.
+
+Typical operations:
+
+```text
+buffer insertion
+hold delay insertion
+cell resizing
+Vt swap
+gate cloning
+load splitting
+local placement adjustment
+incremental route repair
+```
+
+Primary risks:
+
+```text
+fixing setup may break hold
+fixing hold may hurt setup
+resizing may increase load upstream
+buffer insertion may increase congestion
+route repair may change parasitics
+```
+
+Key checks:
+
+```text
+setup delta
+hold delta
+slew/cap/fanout delta
+power delta
+local DRC
+incremental STA across relevant corners
+```
+
+### 5.3 Metal-only ECO
+
+A metal-only ECO changes only metal and via layers, while base layers remain unchanged. It is common when mask cost or tapeout schedule makes diffusion-layer modification undesirable.
+
+Typical operations:
+
+```text
+reconnect spare cells
+change metal routes
+modify tie connections
+patch local nets with existing spare logic
+cut and reconnect metal topology
+```
+
+Primary risks:
+
+```text
+spare cell may be too far away
+routing resources may be insufficient
+LVS mismatch if netlist/layout delta is not aligned
+antenna or DRC violations may be introduced
+parasitics may degrade timing
+```
+
+Key checks:
+
+```text
+spare cell availability
+metal layer change scope
+route DRC
+LVS
+incremental extraction
+STA with patched parasitics
+```
+
+### 5.4 Physical ECO
+
+A physical ECO addresses implementation or signoff issues without necessarily changing logical function.
+
+Typical operations:
+
+```text
+move cell
+legalize local placement
+repair route
+fix antenna
+fix DRC
+adjust filler / decap / tap
+repair local density or spacing issue
+```
+
+Primary risks:
+
+```text
+local geometry fix may cause new DRC
+cell movement may affect timing
+route repair may affect parasitics
+fill adjustment may affect extraction
+```
+
+Key checks:
+
+```text
+local DRC
+LVS if connectivity changes
+incremental STA
+post-fix extraction
+closure summary
+```
+
+---
+
+## 6. ECO Type Matrix
+
+A practical ECO flow should classify a change before applying it.
+
+| ECO Type | Logic Changes? | Physical Changes? | Typical Scope | Main Verification Focus |
+|---|---:|---:|---|---|
+| Functional ECO | Yes | Usually yes | local to moderate | LEC target, LVS, STA |
+| Setup ECO | No | yes | local timing cone | setup improvement, hold regression |
+| Hold ECO | No | yes | short paths | hold improvement, setup regression |
+| Metal-only ECO | Maybe | metal/via only | highly constrained | LVS, DRC, extraction, STA |
+| DRC ECO | No | geometry/local route | local region | DRC clean, no timing regression |
+| Antenna ECO | No | route/diode | affected nets | antenna clean, STA, DRC |
+| Fill ECO | No | dummy metal | density windows | density, extraction, STA delta |
+
+This classification prevents a common mistake: using the same flow for fundamentally different ECO problems.
+
+---
+
+## 7. ECO Data Model: The Change Set
+
+A mature ECO should be represented as a change set, not as an undocumented series of commands.
+
+A change set is a structured description of what will change and how it will be verified.
+
+```text
+ECO Change Set
+├─ metadata
+│  ├─ eco_id
+│  ├─ owner
+│  ├─ reason
+│  ├─ base_revision
+│  └─ target_revision
+├─ logical_delta
+│  ├─ add_cell
+│  ├─ remove_cell
+│  ├─ replace_cell
+│  ├─ reconnect_net
+│  └─ change_constant
+├─ physical_delta
+│  ├─ place_new_cell
+│  ├─ use_spare_cell
+│  ├─ move_cell
+│  ├─ repair_route
+│  └─ modify_metal
+├─ timing_delta
+│  ├─ setup_paths_affected
+│  ├─ hold_paths_affected
+│  ├─ slew_cap_affected
+│  └─ expected_slack_change
+└─ verification_plan
+   ├─ lec
+   ├─ sta
+   ├─ drc
+   ├─ lvs
+   ├─ pex
+   └─ rollback_checkpoint
+```
+
+This structure makes ECO reviewable.
+
+Without a change set, a team may know that “some commands were run,” but it may not know:
+
+```text
+what changed
+why it changed
+what was intentionally allowed to change
+which checks were required
+which reports prove closure
+how to roll back
+```
+
+---
+
+## 8. ECO State Machine
+
+ECO should follow a controlled state machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> RequestReceived
+    RequestReceived --> Classified
+    Classified --> Planned
+    Planned --> BaseStateCaptured
+    BaseStateCaptured --> PatchApplied
+    PatchApplied --> PhysicalUpdated
+    PhysicalUpdated --> TimingChecked
+    TimingChecked --> VerificationChecked
+    VerificationChecked --> Closed
+    VerificationChecked --> Failed
+    Failed --> Replanned
+    Replanned --> PatchApplied
+    Failed --> RolledBack
+    RolledBack --> [*]
+    Closed --> Archived
+    Archived --> [*]
+```
+
+This model matters because ECO is risky. A failed ECO should not leave the design in an undefined state.
+
+At any point, the flow should be able to answer:
+
+```text
+What base state was used?
+What patch was applied?
+Which checks passed?
+Which checks failed?
+Can we safely roll back?
+```
+
+---
+
+## 9. Why Spare Cells Matter
+
+Spare cells are pre-placed cells reserved for future ECO.
+
+Common spare cell types include:
+
+```text
+spare inverter
+spare buffer
+spare NAND
+spare NOR
+spare mux
+spare flop
+spare tie-high / tie-low
+```
+
+They are especially useful for metal-only ECO because the physical transistor structures already exist. Later, metal layers can reconnect them into the functional design.
+
+Before ECO:
+
+```text
+spare cell exists physically
+inputs tied or parked
+output unused or parked
+```
+
+After ECO:
+
+```text
+existing spare cell becomes part of patched logic
+only metal/via connections are changed
+```
+
+Spare cells create ECO flexibility, but they are not free.
+
+They add:
+
+```text
+area overhead
+leakage overhead
+placement density pressure
+power rail connection requirements
+management complexity
+```
+
+The most important spare cell question is not only how many spare cells exist. It is where they are located.
+
+A spare cell that is too far from the ECO target may be unusable for timing or routing reasons.
+
+A useful spare-cell report should include:
+
+```text
+spare cell name
+cell type
+location
+nearest target region
+power domain
+clock domain if sequential
+availability status
+estimated routing distance
+```
+
+---
+
+## 10. Why Timing ECO Is Dangerous
+
+Timing ECO looks local, but timing impact often propagates through cones.
+
+For setup repair, common fixes include:
+
+```text
+resize driver
+insert buffer
+clone driver
+move cells closer
+reduce load
+change Vt
+```
+
+For hold repair, common fixes include:
+
+```text
+insert delay buffer
+increase minimum delay
+adjust local routing
+use slower cell variant
+```
+
+The danger is that setup and hold often pull in opposite directions.
+
+```text
+setup repair wants faster data arrival
+hold repair may need slower data arrival
+```
+
+A local hold buffer can improve one short path but degrade setup on a related path. A resized driver can improve a downstream path while increasing input capacitance and hurting upstream timing.
+
+Therefore, a timing ECO should never report only the target path. It should report:
+
+```text
+target path delta
+neighbor path delta
+fanout cone impact
+fanin cone impact
+setup regression
+hold regression
+slew/cap/fanout changes
+multi-corner impact
+multi-mode impact
+```
+
+A timing ECO is not closed until regression is checked.
+
+---
+
+## 11. Why Functional ECO Requires Careful Equivalence Strategy
+
+A functional ECO changes intended behavior. That means equivalence checking must be set up carefully.
+
+There are two common cases.
+
+### Case 1: Non-functional ECO
+
+Timing ECO, buffering, resizing, or metal-only reconnection that preserves logic should prove:
+
+```text
+old implementation == patched implementation
+```
+
+or, depending on the flow:
+
+```text
+same reference == patched implementation
+```
+
+### Case 2: Functional ECO
+
+A functional bug fix means the old reference and new reference may not be equivalent. The correct target becomes:
+
+```text
+new reference == patched implementation
+```
+
+If the verification target is wrong, a correct ECO may be reported as false failure, or an incorrect ECO may be accepted.
+
+A functional ECO verification plan should explicitly define:
+
+```text
+reference design revision
+implementation design revision
+allowed functional differences
+black-box strategy
+scan/test handling
+constant and tie handling
+clock/reset assumptions
+comparison points
+```
+
+Equivalence checking is not just a tool invocation. It is part of ECO specification.
+
+---
+
+## 12. Why ECO Requires LVS and DRC Re-check
+
+Any physical ECO can change layout behavior.
+
+Examples:
+
+```text
+new route segment -> spacing risk
+new via -> enclosure / cut spacing risk
+metal reconnection -> LVS risk
+antenna diode insertion -> netlist/layout consistency risk
+cell movement -> placement overlap risk
+fill adjustment -> density / extraction impact
+```
+
+So ECO closure must include physical verification appropriate to the change.
+
+A small local ECO may start with incremental checks:
+
+```text
+incremental DRC
+incremental LVS
+localized extraction
+local STA
+```
+
+But before final handoff, the project may still require full-chip signoff checks.
+
+The rule is:
+
+```text
+If the ECO changes what the layout represents, verification must prove that the
+new layout represents the intended design.
+```
+
+---
+
+## 13. ECO Flow Architecture
+
+A robust ECO flow can be organized as follows:
+
+```mermaid
+flowchart TD
+    A[Issue / Change Request] --> B[Classify ECO Type]
+    B --> C[Create ECO Change Set]
+    C --> D[Capture Base State]
+    D --> E[Precheck Design State]
+    E --> F[Apply Logical Patch]
+    F --> G[Apply Physical Patch]
+    G --> H[Local Legalization]
+    H --> I[Route Repair]
+    I --> J[Incremental Extraction]
+    J --> K[Timing Recheck]
+    K --> L[Logic Equivalence Check]
+    L --> M[DRC / LVS Recheck]
+    M --> N[Export ECO Deliverables]
+    N --> O[Archive Reports and Delta]
+```
+
+This architecture separates intent, patching, implementation update, and verification.
+
+It also prevents ECO from becoming an uncontrolled set of manual edits.
+
+---
+
+## 14. Recommended ECO Reports
+
+A serious ECO flow should produce structured reports.
+
+| Report | Purpose |
+|---|---|
+| `eco_change_set.rpt` | What is intended to change |
+| `eco_classification.rpt` | ECO type and required checks |
+| `eco_precheck.rpt` | Whether base state is ready |
+| `eco_cell_delta.rpt` | Added/removed/replaced cells |
+| `eco_net_delta.rpt` | Added/removed/reconnected nets |
+| `eco_spare_cell_usage.rpt` | Spare cells selected and consumed |
+| `eco_route_repair.rpt` | Local routing modifications |
+| `eco_timing_delta.rpt` | Setup/hold/slew/cap change |
+| `eco_lec_summary.rpt` | Logical verification status |
+| `eco_lvs_summary.rpt` | Layout/source consistency status |
+| `eco_drc_summary.rpt` | Physical rule status |
+| `eco_final_summary.rpt` | Final closure decision |
+
+The final summary should not simply say “ECO done.”
+
+It should say:
+
+```text
+base revision
+patch revision
+ECO type
+changed objects
+modified regions
+verification completed
+open risks
+rollback checkpoint
+final status
+```
+
+---
+
+## 15. Common ECO Failure Patterns
+
+| Failure Pattern | Typical Cause | Recommended Response |
+|---|---|---|
+| Patch applied but LVS fails | netlist/layout mismatch | compare logical delta and physical delta |
+| Timing fix creates hold violation | setup/hold tradeoff ignored | run setup/hold regression across scenarios |
+| Metal-only ECO cannot route | spare cell too far or congestion too high | reselect spare, adjust route, or reclassify ECO |
+| LEC fails unexpectedly | wrong reference or unsupported difference | review ECO type and equivalence target |
+| DRC increases after route repair | local geometry fix not rule-clean | run incremental DRC immediately after repair |
+| ECO uses wrong library cell | library version or cell naming issue | validate ECO against project library baseline |
+| Patch is not reproducible | manual edits not captured | convert actions into ECO script and change set |
+| Cannot roll back safely | missing checkpoint | enforce base-state capture before ECO |
+
+Failure classification is important because ECO debug is expensive. A clear taxonomy prevents teams from treating every failure as a generic tool issue.
+
+---
+
+## 16. Methodology: Classify First, Then Modify
+
+A mature ECO flow should not begin by editing the design.
+
+It should begin with classification:
+
+```text
+Does the ECO change intended function?
+Does it require new cells?
+Can it be metal-only?
+Does it touch clock paths?
+Does it affect scan structures?
+Does it cross power domains?
+Does it affect critical timing paths?
+Does it require full-chip verification?
+```
+
+Only after classification should the flow select a repair strategy.
+
+A simple decision table:
+
+| Question | If Yes | If No |
+|---|---|---|
+| Functional behavior changes? | use functional ECO flow | use non-functional ECO flow |
+| Base layers frozen? | use metal-only strategy | physical cell changes may be allowed |
+| Spare cell available nearby? | consider spare-based patch | consider new cell or reclassify |
+| Timing critical area? | require STA regression | local checks may be enough initially |
+| Connectivity changes? | require LVS | DRC-only may be sufficient for geometry ECO |
+| Reference changes? | compare against new reference | compare against same reference |
+
+This avoids one of the worst ECO habits: fixing first and asking what was changed later.
+
+---
+
+## 17. Methodology: Every ECO Must Be Reversible
+
+Rollback is not optional.
+
+ECO usually happens late in the schedule, when the design is valuable and fragile. A failed ECO must not destroy a known-good state.
+
+Before ECO, archive:
+
+```text
+base database
+base netlist
+base DEF / GDS if available
+base timing reports
+base PV reports
+base extraction state
+base tool/environment manifest
+base ECO script version
+```
+
+After ECO, archive:
+
+```text
+patched database
+patched netlist
+patched DEF / GDS
+ECO change set
+ECO command log
+verification reports
+timing delta reports
+rollback notes
+```
+
+The maturity of an ECO system is not measured only by whether it can apply changes quickly. It is measured by whether it can safely return to a clean base state when the change is rejected.
+
+---
+
+## 18. Demo Design: `LAY-BE-22_eco`
+
+The purpose of this demo is not to perform a real foundry-level ECO. The goal is to model the engineering structure of ECO closure.
+
+### Suggested Directory Structure
 
 ```text
 LAY-BE-22_eco/
-  README.md
-  config/
-    env.csh
-    design_config.tcl
-  data/
-    README.md
-  scripts/
-    run_demo.csh
-  tcl/
-    run_demo.tcl
-    precheck.tcl
-    report_utils.tcl
-  logs/
-  reports/
-  output/
-  tmp/
+├─ data/
+│  ├─ base_design_summary.csv
+│  ├─ eco_change_request.csv
+│  ├─ spare_cell_inventory.csv
+│  ├─ timing_path_summary.csv
+│  └─ pv_status_summary.csv
+├─ scripts/
+│  ├─ run_eco_demo.csh
+│  └─ clean.csh
+├─ tcl/
+│  ├─ 01_read_base_state.tcl
+│  ├─ 02_classify_eco.tcl
+│  ├─ 03_generate_change_set.tcl
+│  ├─ 04_estimate_physical_delta.tcl
+│  ├─ 05_estimate_timing_impact.tcl
+│  └─ 06_write_verification_plan.tcl
+├─ reports/
+│  ├─ eco_base_state.rpt
+│  ├─ eco_classification.rpt
+│  ├─ eco_change_set.rpt
+│  ├─ eco_physical_delta.rpt
+│  ├─ eco_timing_impact.rpt
+│  ├─ eco_verification_checklist.rpt
+│  └─ eco_final_plan.rpt
+└─ README.md
 ```
 
-The demo should produce at least three categories of output:
+### Suggested csh Entry
+
+```csh
+#!/bin/csh -f
+
+setenv EDA_TOOL_BIN /path/to/eda_tool
+setenv DESIGN_ROOT  /path/to/LAY-BE-22_eco
+
+$EDA_TOOL_BIN -batch $DESIGN_ROOT/tcl/02_classify_eco.tcl \
+  >&! $DESIGN_ROOT/reports/run_eco_demo.log
+```
+
+The exact command interface depends on the tool. The demo principle is tool-neutral:
 
 ```text
-1. A main report describing the stage result.
-2. A check report describing whether expected objects and files exist.
-3. A log summary that separates warnings, errors, and important state messages.
+read change request
+classify ECO type
+build change set
+estimate affected objects
+estimate timing/PV impact
+write verification checklist
+archive ECO plan
 ```
 
-The purpose is not to mimic a full production chip flow. The purpose is to build a minimal, inspectable engineering unit that demonstrates the principle.
+### Demo Readiness Checklist
 
-## 6. What to Check in Reports
+| Check | Expected Result |
+|---|---|
+| Base design summary exists | PASS |
+| ECO request is readable | PASS |
+| ECO type is classified | PASS |
+| Logical delta is generated | PASS |
+| Physical delta is estimated | PASS |
+| Timing impact is estimated | PASS |
+| Verification checklist is generated | PASS |
+| Final ECO plan is archived | PASS |
 
-A useful report should be written for humans first and scripts second. It should make the stage decision visible: what was checked, what passed, what failed, and what should be reviewed before continuing.
+This demo emphasizes the ECO control model rather than a specific commercial tool command.
 
-For this topic, the report should include:
+---
 
-- `changed instances and nets`
-- `spare-cell usage`
-- `legalization impact`
-- `timing delta`
-- `logical equivalence status`
-- `DRC/LVS delta`
+## 19. Engineering Takeaways
 
-A recommended report skeleton is:
+ECO is where backend flow maturity becomes visible.
+
+A weak ECO process looks like this:
 
 ```text
-# Stage Report
-Generated: <timestamp>
-Demo: LAY-BE-22_eco
-
-## Input Summary
-- design files
-- technology/library files
-- constraint files
-- configuration variables
-
-## Object Summary
-- object class
-- count
-- key properties
-- suspicious empty collections
-
-## Stage Result
-- executed operations
-- pass/fail status
-- warnings/errors
-
-## Next-Stage Gate
-- ready: yes/no
-- reason
-- required fixes
+apply quick patch
+run some reports
+fix new errors
+repeat manually
+hope final checks pass
 ```
 
-The next-stage gate is important. Backend flow engineering is not only about producing a result; it is about deciding whether that result is safe to consume.
-
-## 7. Common Pitfalls
-
-The most common pitfalls are:
-
-- `netlist is changed without matching physical edits`
-- `patch cells are inserted far from the affected logic`
-- `ECO fixes setup while breaking hold`
-- `verification is treated as a final formality instead of a stage checkpoint`
-
-Most of these problems come from treating the flow as a command recipe rather than a database engineering system. A command recipe may work once. A database-aware flow can be debugged, compared, and transferred.
-
-A useful debugging sequence is:
+A mature ECO process looks like this:
 
 ```text
-1. Check whether the expected input files exist.
-2. Check whether the expected database objects were created.
-3. Check whether object counts match the assumption.
-4. Check whether the stage changed the expected objects.
-5. Check whether the reports describe the change clearly.
-6. Check whether the next stage can consume the result.
+classify change
+capture base state
+create change set
+apply controlled patch
+update physical implementation
+run targeted checks
+run regression checks
+archive evidence
+preserve rollback path
 ```
 
-This sequence is slower than guessing, but it produces durable engineering knowledge.
+The difference is not only efficiency. It is risk control.
 
-## 8. GitHub Documentation Style
+ECO is late-stage design surgery. The tool commands are only part of the problem. The real challenge is preserving consistency across multiple representations of the same design.
 
-For GitHub, the article should be connected with executable artifacts. A good repository page should not be only a theory note and should not be only a script dump. It should connect explanation, demo input, demo output, and engineering interpretation.
+---
 
-A recommended GitHub layout is:
+## 20. Summary
+
+ECO is not a small afterthought at the end of backend implementation. It is a constrained engineering change mechanism applied to a design that may already be close to closure.
+
+Its essential goal is:
 
 ```text
-docs/articles/22_eco.md
-examples/LAY-BE-22_eco/
-examples/LAY-BE-22_eco/README.md
-examples/LAY-BE-22_eco/reports/
+change only what must be changed,
+preserve everything else as much as possible,
+and prove that the patched design remains logically, physically, temporally,
+and verification-wise consistent.
 ```
 
-The article explains why the stage matters. The example directory shows how the stage is represented as files and reports. The report directory shows what the user should inspect after a run.
-
-This separation is useful because backend work has two audiences:
+A robust ECO flow needs:
 
 ```text
-- readers who want to understand the method;
-- engineers who want to reproduce the run.
+ECO classification
+base-state capture
+structured change set
+logical delta tracking
+physical delta tracking
+timing impact analysis
+LEC / LVS / DRC / STA checklist
+rollback plan
+final closure report
 ```
 
-## 9. Engineering Takeaways
-
-The central takeaway is:
-
-> An ECO is a constrained change to an already structured implementation; the engineering problem is to apply the smallest safe modification while preserving consistency.
-
-A backend flow becomes reliable when each stage has a clear state model, clear input assumptions, clear object queries, clear reports, and clear next-stage gates. The more complex the design becomes, the less effective ad-hoc scripting becomes. What scales is not command memorization; what scales is a structured engineering method.
-
-For this topic, the practical rules are:
+The key point is simple:
 
 ```text
-- understand the database objects before editing them;
-- check feasibility before judging quality;
-- write reports that explain the stage state;
-- compare runs through stable output files;
-- treat the demo as a small but complete engineering unit.
+ECO success is not defined by whether a patch was applied.
+ECO success is defined by whether the patched design can be verified, signed off,
+reproduced, and safely archived.
 ```
 
-A EDA tool can execute commands, but engineering judgment comes from how we model the state, inspect the result, and preserve the reasoning path from input to output.
+---
 
-## Architecture Deep Dive: What the Stage Really Owns
+## Closing Sentence
 
-This stage owns **late-stage change control across coupled design views**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
-
-The main architectural objects for this stage are:
-
-```text
-change list, spare cells, metal-only edits, placement perturbation, route repair, timing delta, equivalence checks
-```
-
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
-
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
-
-```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
-```
-
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
-
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
-
-## Methodology Playbook
-
-For this topic, the recommended methodology is:
-
-```text
-minimize affected area; make each delta measurable; protect golden references and handoff views
-```
-
-This methodology can be applied at three levels.
-
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
-
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
-
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
-
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
-
-## Design Review Questions
-
-Before accepting this stage as healthy, review the following question:
-
-> Does the ECO fix the intended issue without breaking consistency elsewhere?
-
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
-
-A reviewer should also ask:
-
-```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
-```
-
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
+ECO is the backend flow stage where every design view must agree again: logic must match intent, layout must match logic, timing must remain closed, and verification evidence must prove that the change is controlled.
