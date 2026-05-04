@@ -1,361 +1,1106 @@
-# 20. Routing: What Global Route, Detail Route, and Route Optimization Solve Differently
+# 20. Routing: What Global Route, Detail Route, and Route Optimization Solve in Backend Flow
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-20_routing**  
-> Tags: Backend Flow, Routing, Global Route, Detail Route, Route Optimization, DRC
+Author: Darren H. Chen  
+Topic: Backend Flow / Physical Implementation / Routing / Congestion / DRC / Timing Closure  
+Demo: `LAY-BE-20_routing`
 
-Routing maps a connectivity graph to manufacturable geometry under capacity, timing, signal integrity, and design-rule constraints.
+Routing is often described as the backend stage that connects cells and macros with wires.
 
-In a real backend project, the visible command line is only the surface. Under it, the tool is continuously converting text files, technology rules, design constraints, and physical edits into a typed implementation database. A robust flow is therefore built around three questions:
+That description is correct, but it hides most of the engineering difficulty.
 
-```text
-1. What design state is this stage supposed to create or refine?
-2. Which objects and relationships must be queried to verify that state?
-3. Which reports prove that the state is safe enough for the next stage?
-```
+A placed design already has cells, pins, macros, rows, blockages, clock trees, power structures, and timing constraints. The remaining task is not simply to draw wires between pins. The routing stage must transform logical connectivity into manufacturable metal and via geometry under capacity, design-rule, timing, antenna, signal-integrity, and signoff constraints.
 
-The answer to those questions is the foundation of backend flow engineering.
-
-## 1. Conceptual Model
-
-The important point in this topic is that a backend step is never an isolated command. It is a state transition inside a larger physical implementation system. The input state contains design objects, library models, constraints, and previous physical decisions. The output state must be both usable by the next stage and explainable by reports.
-
-For this article, the most relevant objects are:
-
-- `net`
-- `pin`
-- `routing track`
-- `routing layer`
-- `via`
-- `global route guide`
-- `detail route segment`
-- `design rule violation`
-
-These objects are not just names. They are database entries with type, ownership, geometry, connectivity, timing, and sometimes manufacturing meaning. When a script manipulates them, it is manipulating the implementation state of the chip.
-
-A practical mental model is:
+This is why routing is rarely a single action. It is usually separated into several levels:
 
 ```text
-source files + constraints + technology context
-        |
-        v
-backend database objects
-        |
-        v
-stage-specific transformation
-        |
-        v
-reports + updated database + handoff data
+global route
+↓
+detail route
+↓
+route optimization
 ```
 
-This model is simple, but it prevents a common mistake: treating a backend flow as a sequence of text commands. A mature flow treats every stage as a controlled transition from one database state to another.
+These stages solve different problems.
 
-## 2. Backend Architecture View
-
-A EDA tool usually exposes the stage through Tcl or another command interface. However, the real architecture is layered. A command is parsed, resolved against the current database, checked against technology and design rules, executed by an internal engine, and finally reflected in logs, reports, and updated design objects.
-
-For this topic, a useful architecture decomposition is:
-
-- `routing resource model`
-- `global router`
-- `track assigner`
-- `detail router`
-- `DRC checker`
-- `timing updater`
-- `route optimization engine`
-
-The flow can be visualized as:
+Global route answers:
 
 ```text
-      [routing resource model]
-              |
-              v
-      [global router]
-              |
-              v
-      [track assigner]
-              |
-              v
-      [detail router]
-              |
-              v
-      [DRC checker]
-              |
-              v
-      [timing updater]
-              |
-              v
-      [route optimization engine]
+Where should each net roughly go, and is the routing resource sufficient?
 ```
 
-This architecture view matters because many backend issues are not caused by a single bad command. They are caused by a mismatch between layers. For example, a script may request a legal operation, but the database context is incomplete. A file may be syntactically valid, but the objects created from it do not match the assumptions of the next stage. A report may look clean, but only because the relevant object collection was empty.
-
-Therefore, a GitHub demo should not only run a command. It should also show the layer boundaries: configuration, database input, stage execution, report generation, and verification checks.
-
-## 3. Engineering Methodology
-
-The recommended methodology is to move from feasibility to quality. Feasibility asks whether the required objects, constraints, and database context exist. Quality asks whether the result is good enough. Mixing these two questions is a common source of confusion.
-
-For this stage, the working rules are:
-
-- `check routing capacity before detail route`
-- `separate topology planning from legal geometry`
-- `review DRC and timing together`
-- `track via count and layer usage`
-- `keep route status reports at every routing stage`
-
-The general methodology is:
+Detail route answers:
 
 ```text
-Precheck  ->  Stage execution  ->  State query  ->  Report  ->  Comparison  ->  Next-stage gate
+How can each net be implemented as exact tracks, wires, vias, and legal geometries?
 ```
 
-The precheck phase should verify that all required inputs and assumptions exist. The execution phase should be as deterministic as possible. The query phase should inspect the database rather than relying only on log text. The report phase should write stable files that can be compared across runs. The gate phase should decide whether the next stage is allowed to proceed.
-
-This is especially important for GitHub-style examples. A demo that only prints a successful run log is weak evidence. A demo that prints object counts, state checks, and report summaries is much stronger.
-
-## 4. Data Model and Object Relationships
-
-The data model behind this topic can be understood as a graph. Objects are nodes. Connectivity, hierarchy, geometry, timing arcs, rule references, and ownership are edges. The EDA tool does not operate on a flat list; it operates on a structured graph with many views.
-
-A simplified view is:
+Route optimization answers:
 
 ```text
-logical hierarchy ---- owns ---- instances / modules
-        |                         |
-        |                         v
-        |                    pins / ports ---- connect ---- nets
-        |                         |                         |
-        v                         v                         v
-constraints              timing arcs / checks          physical routes
-        |                         |                         |
-        v                         v                         v
-reports                  timing paths                  DRC / PV results
+After connectivity exists, does the routed design still satisfy timing, DRC, antenna, SI, and final QoR goals?
 ```
 
-The most important engineering implication is that every stage must preserve cross-view consistency. A physical change may affect timing. A timing fix may affect routing. A routing fix may affect physical verification. A low-power or hierarchical constraint may affect all of them.
+Understanding this separation is essential. Many routing failures are misunderstood because engineers treat routing as one black-box command. A mature backend flow should inspect global route, detail route, and route optimization separately, with separate reports, separate quality checks, and separate fallback decisions.
 
-The right way to debug is not to ask only, "Which command failed?" The better question is:
+---
+
+## 1. Routing Converts Connectivity into Manufacturing Geometry
+
+Before routing, a net is a logical connectivity object.
+
+For example:
 
 ```text
-Which view of the design became inconsistent with another view?
+net N1 connects:
+  U1/Z
+  U2/A
+  U3/B
 ```
 
-## 5. Demo Design
+After placement, the tool knows where `U1`, `U2`, and `U3` are located. It also knows the approximate or exact pin geometries from LEF and design database objects.
 
-The paired demo is:
+But the net is not yet a manufacturable shape.
+
+Routing must convert it into:
 
 ```text
-LAY-BE-20_routing
+metal segments
+vias
+layers
+wire widths
+wire spacings
+routing topology
+pin access connections
+legal geometry
 ```
 
-The demo should be self-contained. It should use a local directory structure, local sample data where possible, local Tcl scripts, local report files, and a local run manifest. It should not depend on files from another demo. This makes the example easy to copy, review, and rerun.
+A simplified transformation is:
 
-A recommended directory structure is:
+```text
+logical net
+  ↓
+placed pins
+  ↓
+routing topology
+  ↓
+track assignment
+  ↓
+wire and via geometry
+  ↓
+DRC-clean routed layout
+```
+
+This is the point where the backend database becomes much closer to final layout. Placement determines where objects are. Routing determines how those objects are physically connected.
+
+A useful mental model is:
+
+```text
+placement maps cells into space;
+routing maps nets into metal resources.
+```
+
+---
+
+## 2. The Routing Problem Is a Multi-Layer Resource Allocation Problem
+
+Routing is not performed on an unlimited blank canvas.
+
+The routing fabric is constrained by:
+
+```text
+metal layers
+preferred directions
+routing tracks
+via rules
+blockages
+macro obstructions
+power stripes
+clock routing structures
+spacing rules
+width rules
+antenna rules
+manufacturing grid
+```
+
+A simplified multi-layer model looks like this:
+
+```text
+M1: local connection layer / pin access layer
+M2: preferred vertical routing
+M3: preferred horizontal routing
+M4: preferred vertical routing
+M5: preferred horizontal routing
+...
+VIA12: connects M1 to M2
+VIA23: connects M2 to M3
+...
+```
+
+Routing can be abstracted as a graph search problem:
+
+```text
+RoutingGraph = Nodes + Edges + Capacities + Costs + Rules
+```
+
+Where:
+
+| Element | Meaning |
+|---|---|
+| Node | routing grid point, gcell, track point, pin access point |
+| Edge | possible wire segment or layer transition |
+| Capacity | available routing resource in a region or track |
+| Cost | wirelength, congestion, via count, timing cost, rule risk |
+| Rule | spacing, width, via, blockage, antenna, NDR, layer constraint |
+
+A router must find paths for many nets while sharing limited resources.
+
+The difficult part is coupling:
+
+```text
+one net consumes resources;
+resource consumption affects other nets;
+detours affect timing;
+timing fixes affect congestion;
+DRC repair changes geometry;
+geometry changes parasitics;
+parasitics change slack.
+```
+
+This is why routing cannot be understood as a drawing operation. It is a constrained resource allocation and physical realization problem.
+
+---
+
+## 3. Routing Architecture in Backend Flow
+
+A routing stage typically consumes the output of placement and CTS, then produces the physical connectivity needed for signoff preparation.
+
+```mermaid
+flowchart TD
+    A[Linked Design Database] --> R[Routing System]
+    B[Placed Cells and Macros] --> R
+    C[Clock Tree / Clock Route Intent] --> R
+    D[Power Network and Blockages] --> R
+    E[LEF / Tech Layers / Via Rules] --> R
+    F[Timing Constraints and Critical Nets] --> R
+    G[Routing Rules / NDR / Antenna Rules] --> R
+
+    R --> GR[Global Route]
+    GR --> GC[Congestion and Capacity Reports]
+    GR --> DR[Detail Route]
+    DR --> DC[DRC / Open / Short / Pin Access Reports]
+    DR --> RO[Route Optimization]
+    RO --> QR[Final Route QoR Reports]
+
+    QR --> STA[Post-Route Timing]
+    QR --> PV[Physical Verification Handoff]
+    QR --> ECO[Post-Route ECO]
+```
+
+This architecture shows a key point: routing is not isolated. It sits at the intersection of placement, clock implementation, power structure, technology rules, timing constraints, and signoff requirements.
+
+A routing flow that only checks whether a command finished is too shallow. A routing flow must check whether the physical connectivity is healthy.
+
+---
+
+## 4. Global Route: Planning Routing Corridors and Capacity
+
+Global route does not usually produce final detailed metal shapes.
+
+It solves a coarser problem:
+
+```text
+Which approximate regions, layers, and corridors should each net use?
+```
+
+The routing area is often divided into coarse regions or grid cells. The global router estimates demand and capacity across those regions.
+
+A simple grid example:
+
+```text
++------+------+------+
+| G1   | G2   | G3   |
++------+------+------+
+| G4   | G5   | G6   |
++------+------+------+
+| G7   | G8   | G9   |
++------+------+------+
+```
+
+If many nets need to pass through `G5`, demand may exceed available routing capacity.
+
+Global route reports this as congestion or overflow.
+
+Global route mainly answers:
+
+```text
+Which regions are overloaded?
+Which nets are likely to be difficult?
+Which layers are overused?
+Which macro channels are too narrow?
+Which pin-dense areas are risky?
+Is the placement routable at a global level?
+```
+
+Typical global route outputs include:
+
+```text
+routing guides
+congestion map
+edge overflow report
+estimated wirelength
+estimated via count
+layer usage summary
+critical net routing estimate
+```
+
+A good global route result does not guarantee clean detail route, but a bad global route result is a strong warning that detail route will struggle.
+
+---
+
+## 5. What Global Route Does Not Solve
+
+Global route is intentionally approximate.
+
+It does not fully solve:
+
+```text
+exact track assignment
+exact pin access
+exact via placement
+all local spacing rules
+all end-of-line rules
+all cut spacing rules
+all min-area rules
+all detailed DRC interactions
+```
+
+That is why a global route can look acceptable while detail route still fails locally.
+
+For example:
+
+```text
+Global route says a net can pass through a macro channel.
+Detail route discovers that pin access and local tracks are blocked.
+```
+
+Or:
+
+```text
+Global route sees enough capacity in a region.
+Detail route sees a via spacing conflict near a dense pin cluster.
+```
+
+Therefore global route should be interpreted as a routability planning stage, not as final routing success.
+
+---
+
+## 6. Global Route Metrics
+
+Global route reports should be interpreted with clear metrics.
+
+| Metric | Meaning | Engineering Use |
+|---|---|---|
+| Total overflow | total amount of demand exceeding capacity | overall routability risk |
+| Max overflow | worst local overflow | hotspot severity |
+| Overflow edges | number of over-capacity grid edges | spread of congestion |
+| Layer usage | demand per routing layer | layer imbalance diagnosis |
+| Estimated wirelength | approximate route length | timing and power proxy |
+| Estimated via count | approximate layer transitions | delay, reliability, and DRC proxy |
+| Critical net detour | detour on timing-sensitive nets | timing risk |
+| Macro channel overflow | congestion near macros | floorplan feedback |
+
+The most important point is trend analysis.
+
+A single global route report is useful. But comparing global route reports across placement or floorplan iterations is much more useful.
+
+For example:
+
+```text
+Iteration A: max overflow high near macro channel
+Iteration B: macro moved, max overflow reduced
+Iteration C: local density reduced, overflow edges reduced
+```
+
+This kind of comparison turns routing from a late-stage surprise into an early physical feedback loop.
+
+---
+
+## 7. Detail Route: Turning Routing Intent into Legal Geometry
+
+Detail route uses the global route intent and creates exact routing geometry.
+
+It decides:
+
+```text
+which track to use
+which layer to use
+where to enter each pin
+where to place each via
+how to avoid blockages
+how to satisfy spacing rules
+how to resolve shorts and opens
+how to repair local DRCs
+```
+
+Detail route is where abstract connectivity becomes actual layout geometry.
+
+It must solve many local constraints that global route does not fully model:
+
+```text
+pin access
+track assignment
+via enclosure
+cut spacing
+end-of-line spacing
+minimum area
+short avoidance
+open avoidance
+macro obstruction avoidance
+route blockage compliance
+```
+
+This stage is usually much more rule-sensitive.
+
+If detail route fails, the reason may be very local:
+
+```text
+a pin has no legal access point;
+a macro blockage blocks all available tracks;
+a via cannot be legally placed;
+two dense nets create unavoidable spacing conflicts;
+a small detour creates min-area or notch issues;
+local power and clock structures consume too many tracks.
+```
+
+---
+
+## 8. Pin Access Is Often the First Local Routing Bottleneck
+
+A router must connect wires to pins.
+
+This sounds simple, but pin access is frequently difficult.
+
+A standard cell or macro pin may have limited shapes, limited layers, and nearby obstructions. If many pins are packed in a small region, legal access points can be scarce.
+
+Typical pin access problems include:
+
+```text
+pin shape too small
+pin blocked by cell obstruction
+pin blocked by macro obstruction
+adjacent pin spacing conflict
+no legal via access
+wrong routing layer preference
+high local pin density
+```
+
+Pin access is especially important near:
+
+```text
+standard-cell pin clusters
+macro boundaries
+clock buffers
+scan register clusters
+power strap intersections
+high-density placement regions
+```
+
+A route failure near a pin is not always a router weakness. It may indicate poor placement density, difficult library pin geometry, macro channel issues, or excessive blockage.
+
+---
+
+## 9. Detail Route Metrics
+
+A detail route report should not only say `route completed`.
+
+It should summarize physical health.
+
+| Metric | Meaning | Risk Indicated |
+|---|---|---|
+| Open count | nets not fully connected | functional failure |
+| Short count | unintended connections | functional and signoff failure |
+| DRC count by type | rule violations | manufacturability risk |
+| Pin access failures | pins with no legal route access | library / placement / macro channel issue |
+| Via count | number of vias | delay, reliability, and DRC risk |
+| Wirelength by layer | route length distribution | layer overuse or timing risk |
+| Detour estimate | route path longer than expected | timing and congestion risk |
+| Antenna risk count | potential antenna violations | manufacturing reliability risk |
+| Local hotspot list | regions with repeated repair | routing convergence risk |
+
+A healthy detail route is not simply connected. It should also be DRC-clean or close to clean, timing-aware, not excessively detoured, and not dominated by local route repair loops.
+
+---
+
+## 10. Route Optimization: Fixing the Routed Design
+
+After detail route, the design has real or near-real routing geometry.
+
+This exposes issues that earlier stages could only estimate.
+
+Route optimization addresses questions such as:
+
+```text
+Did routing degrade timing?
+Are transition and capacitance still acceptable?
+Are there antenna risks?
+Are there DRC hotspots?
+Are critical nets routed with excessive detours?
+Are coupling effects significant?
+Can via count be improved?
+Can selected nets be widened or spaced?
+Can incremental reroute improve QoR?
+```
+
+Route optimization may include:
+
+```text
+timing-driven reroute
+wire spreading
+wire widening
+via optimization
+antenna fixing
+buffer insertion
+cell resizing
+incremental placement repair
+crosstalk-aware cleanup
+DRC cleanup
+hold/setup repair
+```
+
+This stage is highly coupled.
+
+For example:
+
+```text
+fixing a DRC may increase wirelength;
+reducing coupling may increase congestion;
+adding a buffer may require placement space;
+fixing hold may worsen power and area;
+fixing antenna may add diode cells or layer jumps;
+rerouting one net may create new violations nearby.
+```
+
+Therefore route optimization should be measured as a convergence process, not a one-command cleanup step.
+
+---
+
+## 11. Why Timing Changes After Routing
+
+Before detailed routing, net delay is usually estimated.
+
+After routing, wire geometry becomes more realistic. The tool can calculate or estimate more accurate RC.
+
+Timing changes because routing changes:
+
+```text
+wirelength
+layer assignment
+via count
+wire resistance
+wire capacitance
+coupling capacitance
+route detour
+pin access path
+clock route realization
+shielding or spacing
+```
+
+In timing equations, net delay affects both data paths and clock paths.
+
+Therefore post-route timing can differ significantly from pre-route timing.
+
+A path that looked acceptable after placement may fail after routing if:
+
+```text
+the routed net detours around a macro;
+the net uses lower-resistance assumptions before route;
+the final via count is high;
+coupling capacitance is larger than estimated;
+clock path and data path change differently.
+```
+
+This is why post-route timing is not optional. It is the first timing analysis based on much more concrete physical connectivity.
+
+---
+
+## 12. Routing and DRC Are Tightly Coupled
+
+Detail route must obey design rules.
+
+These rules may include:
+
+```text
+minimum width
+minimum spacing
+end-of-line spacing
+minimum area
+via enclosure
+cut spacing
+parallel run length rules
+antenna rules
+density-related rules
+non-default route rules
+blockage rules
+```
+
+At advanced nodes, rule interactions can be highly complex.
+
+A route that is topologically correct may still be illegal.
+
+For example:
+
+```text
+The net is connected, but spacing is violated.
+The wire is legal alone, but illegal near a via.
+The route avoids shorts, but creates min-area violations.
+The detour fixes congestion, but creates antenna risk.
+```
+
+This is why route DRC reports must be part of the routing evidence chain.
+
+Routing is not complete just because connectivity exists. It is complete only when connectivity, legality, timing, and signoff readiness are all acceptable.
+
+---
+
+## 13. Routing and Antenna Effects
+
+Antenna risk appears during manufacturing when long metal segments connected to gate inputs accumulate charge before a discharge path exists.
+
+Routing can affect antenna in several ways:
+
+```text
+long metal segment length
+layer usage
+via jumping strategy
+connection order
+presence of diode cells
+connection to diffusion
+```
+
+Antenna repair may require:
+
+```text
+jumping to higher layers
+inserting antenna diodes
+changing route topology
+adding vias
+rerouting selected nets
+```
+
+These repairs can affect:
+
+```text
+timing
+area
+congestion
+DRC
+power
+```
+
+Therefore antenna fixing should not be treated as a disconnected final cleanup. It is part of post-route convergence.
+
+---
+
+## 14. Routing and Signal Integrity
+
+After routing, wires have real neighborhood relationships.
+
+This introduces coupling and crosstalk effects.
+
+Signal integrity concerns include:
+
+```text
+coupling capacitance
+crosstalk delay
+noise glitch
+aggressor/victim interaction
+clock sensitivity
+hold degradation
+setup degradation
+```
+
+Possible mitigation methods include:
+
+```text
+wire spacing
+shielding
+critical net protection
+slew control
+layer reassignment
+reroute
+buffer insertion
+```
+
+SI cannot be fully understood before routing because adjacency is not yet concrete.
+
+This is another reason why post-route analysis often reopens timing and optimization loops.
+
+---
+
+## 15. Routing and Congestion Feedback
+
+Congestion means routing demand exceeds available routing resources.
+
+It can arise from:
+
+```text
+high placement density
+narrow macro channels
+high pin density
+limited routing layers
+power stripes consuming tracks
+clock routes consuming preferred resources
+scan chains crossing regions
+bus structures crossing the chip
+IO placement mismatch
+floorplan constraints
+```
+
+Routing congestion should be treated as feedback to earlier stages.
+
+A router can repair some local issues, but it cannot always fix a fundamentally over-constrained floorplan or placement.
+
+For example:
+
+```text
+If macro spacing is too narrow, detail route cannot invent routing tracks.
+If pin density is too high, route optimization may only move violations around.
+If placement packs too many cells near a blocked region, global route overflow may persist.
+```
+
+Mature routing debug asks:
+
+```text
+Is this a routing problem?
+Or is it a floorplan / placement / macro / IO / power-structure problem exposed by routing?
+```
+
+---
+
+## 16. Timing-Driven Routing versus Congestion-Driven Routing
+
+Routing resources are limited.
+
+Timing-driven routing tries to give important nets better routing resources:
+
+```text
+shorter path
+higher metal layer
+fewer vias
+less coupling
+better shielding
+less detour
+```
+
+Congestion-driven routing tries to spread demand and avoid overflow.
+
+These goals can conflict.
+
+For example:
+
+```text
+A critical net wants the shortest path through a congested region.
+Congestion avoidance wants to detour it around the region.
+```
+
+A mature routing strategy classifies nets:
+
+| Net Type | Typical Routing Priority |
+|---|---|
+| clock net | controlled route rule, skew and latency sensitivity |
+| critical data net | timing-aware resource priority |
+| high-fanout control net | capacitance and congestion awareness |
+| scan chain net | routability and test-mode timing awareness |
+| power/ground net | special routing and reliability priority |
+| non-critical data net | flexible detour tolerance |
+
+The key engineering question is:
+
+```text
+Which nets deserve scarce routing resources, and which nets can tolerate lower-quality paths?
+```
+
+That question cannot be answered by connectivity alone. It needs timing, physical, and design-intent context.
+
+---
+
+## 17. Routing State Machine
+
+Routing can be represented as a stage state machine.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Route_Precheck
+    Route_Precheck --> Global_Route: placement, clock, power, layers ready
+    Route_Precheck --> Blocked: missing route prerequisites
+
+    Global_Route --> Global_Route_Report
+    Global_Route_Report --> Floorplan_Placement_Feedback: severe overflow
+    Global_Route_Report --> Detail_Route: congestion acceptable
+
+    Detail_Route --> Detail_Route_Report
+    Detail_Route_Report --> Local_Route_Repair: DRC / open / short issues
+    Detail_Route_Report --> Route_Optimize: connectivity and DRC close enough
+
+    Local_Route_Repair --> Detail_Route_Report
+
+    Route_Optimize --> Post_Route_Timing
+    Post_Route_Timing --> Incremental_Route_Optimize: timing or SI issue
+    Incremental_Route_Optimize --> Post_Route_Timing
+
+    Post_Route_Timing --> Final_Route_QoR: timing, DRC, antenna, SI acceptable
+    Final_Route_QoR --> [*]
+```
+
+This state machine is useful because it prevents a common mistake: forcing all routing problems into local detail-route repair.
+
+Some problems should go back to floorplan or placement. Some should be fixed by route optimization. Some should be fixed by constraint correction. Some may need library or pin-access investigation.
+
+---
+
+## 18. Route Precheck
+
+Before routing, the flow should verify that the design is ready.
+
+A route precheck should include:
+
+```text
+placement legality
+cell overlap status
+unplaced cell count
+clock tree availability
+power network availability
+routing layer definition
+via rule availability
+macro obstruction status
+route blockage status
+NDR / route rule availability
+critical net marking
+antenna rule availability
+pre-route timing baseline
+congestion estimate
+```
+
+A route precheck report may look like:
+
+```text
+[PASS] placement legal
+[PASS] clock tree exists
+[PASS] routing layers defined
+[PASS] via rules loaded
+[WARN] macro channel congestion near u_sram0
+[WARN] high pin density near region R12
+[FAIL] route rule CLK_NDR is referenced but not defined
+```
+
+If route precheck fails, running global or detail route may waste time and create confusing logs.
+
+---
+
+## 19. Reports Required for a Mature Routing Stage
+
+Routing needs a report stack, not one final log.
+
+Recommended reports include:
+
+| Report | Purpose |
+|---|---|
+| `route_precheck.rpt` | verifies routing entry conditions |
+| `global_route_summary.rpt` | summarizes guides, overflow, layer usage, estimated wirelength |
+| `congestion_summary.rpt` | identifies routing hotspots and capacity issues |
+| `detail_route_summary.rpt` | summarizes opens, shorts, DRC categories, pin-access issues |
+| `route_drc_summary.rpt` | classifies remaining route-related violations |
+| `antenna_fix_summary.rpt` | records antenna risk and repair actions |
+| `route_opt_summary.rpt` | records timing/DRC/SI optimization changes |
+| `post_route_timing.rpt` | reports timing after route parasitic impact |
+| `final_route_qor.rpt` | consolidates route health metrics |
+
+These reports answer different questions.
+
+A single `route completed` message cannot replace them.
+
+---
+
+## 20. How to Judge Routing Health
+
+A routed design should be evaluated from multiple angles.
+
+A good final route health checklist includes:
+
+```text
+all nets connected
+no shorts
+open count is zero
+DRC count is acceptable or zero
+antenna violations are resolved or planned
+post-route timing is acceptable
+transition and capacitance are acceptable
+route detours are not excessive
+via count is not abnormal
+critical nets are not over-detoured
+clock route rules are respected
+congestion hotspots are explained
+SI risk is acceptable
+route reports are reproducible
+```
+
+Routing health should not be judged by one metric.
+
+For example:
+
+```text
+DRC-clean but timing-broken is not healthy.
+Timing-clean but severe antenna violations are not healthy.
+Connected but excessive detour is not healthy.
+Low congestion but many pin-access failures is not healthy.
+```
+
+Routing is healthy only when connectivity, manufacturability, timing, and handoff readiness are simultaneously acceptable.
+
+---
+
+## 21. Common Failure Patterns
+
+| Failure Pattern | Symptom | Likely Root Cause | Typical Action |
+|---|---|---|---|
+| Global overflow | high routing demand in selected gcells | placement density, macro channel, insufficient layers | floorplan or placement adjustment |
+| Pin access failure | pins cannot be legally connected | cell pin geometry, local density, obstruction | placement spreading, library review, local reroute |
+| Persistent DRC hotspot | same region repeatedly violates rules | local over-constraint, macro boundary, power/clock interference | local blockage/routing strategy review |
+| Post-route timing degradation | WNS/TNS worse after route | detours, RC, coupling, via count | route optimize, placement/timing feedback |
+| High via count | many layer transitions | routing topology, obstruction, layer strategy | via optimization, NDR review |
+| Antenna violations | long metal connected to gates | route topology and manufacturing sequence | diode insertion, layer jump, reroute |
+| Open nets | incomplete connectivity | pin access, blockage, router failure | local debug and reroute |
+| Shorts | unintended metal contact | DRC/routing conflict, rule issue | route cleanup and rule inspection |
+| Clock route deviation | clock net not following expected rule | missing route rule or NDR setup | route-rule precheck and reroute |
+| Recurrent route ECO churn | one fix creates another failure | over-constrained region | step back to placement/floorplan |
+
+The table is important because it separates symptoms from root causes.
+
+Not every route failure should be fixed by rerouting. Some failures are only exposed by routing but caused earlier.
+
+---
+
+## 22. Methodology: Separate Planning, Realization, and Cleanup
+
+A robust routing flow separates three concepts:
+
+```text
+planning
+realization
+cleanup
+```
+
+Global route is planning.
+
+```text
+It estimates resource demand and routing corridors.
+```
+
+Detail route is realization.
+
+```text
+It creates exact manufacturable geometry.
+```
+
+Route optimization is cleanup and convergence.
+
+```text
+It repairs and improves timing, DRC, antenna, SI, and final QoR.
+```
+
+When these three are mixed together, debug becomes difficult.
+
+When they are separated, each stage can have its own entry conditions, reports, failure classification, and corrective action.
+
+---
+
+## 23. Demo Design: LAY-BE-20_routing
+
+The goal of `LAY-BE-20_routing` is not to reproduce a full industrial route. The goal is to demonstrate how routing should be observed as a staged engineering process.
+
+Recommended repository structure:
 
 ```text
 LAY-BE-20_routing/
-  README.md
-  config/
-    env.csh
-    design_config.tcl
-  data/
-    README.md
-  scripts/
-    run_demo.csh
-  tcl/
-    run_demo.tcl
-    precheck.tcl
-    report_utils.tcl
-  logs/
-  reports/
-  output/
-  tmp/
+├─ data/
+│  ├─ sample_global_route.rpt
+│  ├─ sample_detail_route.rpt
+│  ├─ sample_congestion.rpt
+│  ├─ sample_route_drc.rpt
+│  └─ sample_post_route_timing.rpt
+├─ scripts/
+│  ├─ run_routing_demo.csh
+│  └─ clean.csh
+├─ tcl/
+│  ├─ 01_route_precheck.tcl
+│  ├─ 02_run_global_route.tcl
+│  ├─ 03_report_congestion.tcl
+│  ├─ 04_run_detail_route.tcl
+│  ├─ 05_run_route_optimize.tcl
+│  └─ 06_report_route_qor.tcl
+├─ reports/
+│  ├─ route_precheck.rpt
+│  ├─ global_route_summary.rpt
+│  ├─ congestion_summary.rpt
+│  ├─ detail_route_summary.rpt
+│  ├─ route_opt_summary.rpt
+│  └─ final_route_qor.rpt
+└─ README.md
 ```
 
-The demo should produce at least three categories of output:
+A generic shell entry can be:
+
+```csh
+#!/bin/csh -f
+
+set nonomatch
+
+setenv EDA_TOOL_BIN /path/to/eda_tool
+setenv DESIGN_ROOT  /path/to/LAY-BE-20_routing
+
+$EDA_TOOL_BIN -batch $DESIGN_ROOT/tcl/01_route_precheck.tcl \
+  >&! $DESIGN_ROOT/reports/run_route_precheck.log
+
+$EDA_TOOL_BIN -batch $DESIGN_ROOT/tcl/02_run_global_route.tcl \
+  >&! $DESIGN_ROOT/reports/run_global_route.log
+
+$EDA_TOOL_BIN -batch $DESIGN_ROOT/tcl/04_run_detail_route.tcl \
+  >&! $DESIGN_ROOT/reports/run_detail_route.log
+```
+
+The demo should verify:
 
 ```text
-1. A main report describing the stage result.
-2. A check report describing whether expected objects and files exist.
-3. A log summary that separates warnings, errors, and important state messages.
+global route and detail route are reported separately;
+congestion is independently summarized;
+route optimization has before/after evidence;
+post-route timing is archived;
+route QoR is judged from multiple metrics;
+routing failures are classified by likely root cause.
 ```
 
-The purpose is not to mimic a full production chip flow. The purpose is to build a minimal, inspectable engineering unit that demonstrates the principle.
+---
 
-## 6. What to Check in Reports
+## 24. Demo Input and Output
 
-A useful report should be written for humans first and scripts second. It should make the stage decision visible: what was checked, what passed, what failed, and what should be reviewed before continuing.
+### Inputs
 
-For this topic, the report should include:
+The demo can use either a minimal design or sample reports.
 
-- `routed net percentage`
-- `open and short count`
-- `DRC count by rule type`
-- `via count`
-- `layer usage`
-- `post-route timing trend`
-
-A recommended report skeleton is:
+Recommended inputs:
 
 ```text
-# Stage Report
-Generated: <timestamp>
-Demo: LAY-BE-20_routing
-
-## Input Summary
-- design files
-- technology/library files
-- constraint files
-- configuration variables
-
-## Object Summary
-- object class
-- count
-- key properties
-- suspicious empty collections
-
-## Stage Result
-- executed operations
-- pass/fail status
-- warnings/errors
-
-## Next-Stage Gate
-- ready: yes/no
-- reason
-- required fixes
+linked and placed design database
+floorplan and routing layer context
+clock tree or clock route intent
+sample global route report
+sample detail route report
+sample congestion report
+sample route DRC report
+sample post-route timing report
 ```
 
-The next-stage gate is important. Backend flow engineering is not only about producing a result; it is about deciding whether that result is safe to consume.
+### Outputs
 
-## 7. Common Pitfalls
-
-The most common pitfalls are:
-
-- `global-route congestion is ignored until detail-route failure`
-- `shorts/opens are treated as isolated issues`
-- `route timing is compared against pre-route estimates without context`
-- `signal integrity is considered only after signoff extraction`
-
-Most of these problems come from treating the flow as a command recipe rather than a database engineering system. A command recipe may work once. A database-aware flow can be debugged, compared, and transferred.
-
-A useful debugging sequence is:
+Recommended outputs:
 
 ```text
-1. Check whether the expected input files exist.
-2. Check whether the expected database objects were created.
-3. Check whether object counts match the assumption.
-4. Check whether the stage changed the expected objects.
-5. Check whether the reports describe the change clearly.
-6. Check whether the next stage can consume the result.
+route_precheck.rpt
+global_route_summary.rpt
+congestion_summary.rpt
+detail_route_summary.rpt
+route_drc_summary.rpt
+route_opt_summary.rpt
+post_route_timing_summary.rpt
+final_route_qor.rpt
 ```
 
-This sequence is slower than guessing, but it produces durable engineering knowledge.
+The most important output is `final_route_qor.rpt`.
 
-## 8. GitHub Documentation Style
-
-For GitHub, the article should be connected with executable artifacts. A good repository page should not be only a theory note and should not be only a script dump. It should connect explanation, demo input, demo output, and engineering interpretation.
-
-A recommended GitHub layout is:
+It should summarize:
 
 ```text
-docs/articles/20_routing.md
-examples/LAY-BE-20_routing/
-examples/LAY-BE-20_routing/README.md
-examples/LAY-BE-20_routing/reports/
+connectivity status
+open / short count
+DRC count by category
+congestion hotspots
+wirelength / via metrics
+timing impact
+antenna risk
+SI risk
+route stage PASS / WARN / FAIL
 ```
 
-The article explains why the stage matters. The example directory shows how the stage is represented as files and reports. The report directory shows what the user should inspect after a run.
+This report makes routing review systematic.
 
-This separation is useful because backend work has two audiences:
+---
+
+## 25. From Routing to Signoff
+
+Routing is a major milestone, but it is not the end of backend flow.
+
+After routing, the design moves toward signoff-oriented checks:
 
 ```text
-- readers who want to understand the method;
-- engineers who want to reproduce the run.
+post-route timing
+physical verification
+antenna check
+parasitic extraction
+signal integrity analysis
+IR / EM analysis
+metal fill
+ECO
+final export
 ```
 
-## 9. Engineering Takeaways
+Routing quality strongly affects all of these.
 
-The central takeaway is:
-
-> Routing maps a connectivity graph to manufacturable geometry under capacity, timing, signal integrity, and design-rule constraints.
-
-A backend flow becomes reliable when each stage has a clear state model, clear input assumptions, clear object queries, clear reports, and clear next-stage gates. The more complex the design becomes, the less effective ad-hoc scripting becomes. What scales is not command memorization; what scales is a structured engineering method.
-
-For this topic, the practical rules are:
+A poor route may appear connected but later fail because:
 
 ```text
-- understand the database objects before editing them;
-- check feasibility before judging quality;
-- write reports that explain the stage state;
-- compare runs through stable output files;
-- treat the demo as a small but complete engineering unit.
+post-route timing is too poor;
+DRC violations are difficult to clean;
+antenna repairs change timing;
+extraction produces worse parasitics than expected;
+SI effects degrade critical paths;
+ECO has no routing space left.
 ```
 
-A EDA tool can execute commands, but engineering judgment comes from how we model the state, inspect the result, and preserve the reasoning path from input to output.
+Therefore routing should be treated as the gateway from implementation to signoff preparation.
 
-## Architecture Deep Dive: What the Stage Really Owns
+---
 
-This stage owns **routing as capacity planning plus geometrical realization**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
+## 26. Summary
 
-The main architectural objects for this stage are:
+Routing is the process of converting design connectivity into manufacturable metal and via geometry.
+
+It should be understood in layers:
 
 ```text
-routing grid, guides, tracks, vias, preferred layers, DRC rules, congestion, detours
+global route  -> routing plan and congestion visibility
+detail route  -> legal track/via/pin-access geometry
+route optimize -> timing/DRC/antenna/SI/QoR convergence
 ```
 
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
+The key conclusions are:
 
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
+1. Routing is a multi-layer resource allocation and geometry realization problem.
+2. Global route plans routing corridors and exposes congestion risk.
+3. Detail route creates exact legal geometry and handles pin access, vias, tracks, opens, shorts, and DRC.
+4. Route optimization repairs timing, DRC, antenna, SI, and other post-route issues.
+5. Post-route timing changes because routed RC and coupling are much more concrete.
+6. Congestion may originate from floorplan, placement, macro, power, clock, IO, or scan structure issues.
+7. A mature routing flow requires separate precheck, global route report, detail route report, optimization report, and final QoR report.
+8. Routing is not the end of backend flow; it is the gateway into signoff preparation.
 
-```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
-```
+---
 
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
+## Final Takeaway
 
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
+Global route decides where the roads should roughly go.
 
-## Methodology Playbook
+Detail route decides how the roads are actually built.
 
-For this topic, the recommended methodology is:
+Route optimization decides whether the built roads satisfy timing, manufacturability, signal integrity, antenna, and signoff goals.
 
-```text
-solve capacity before geometry; separate global and detailed problems; review violations with route context
-```
-
-This methodology can be applied at three levels.
-
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
-
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
-
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
-
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
-
-## Design Review Questions
-
-Before accepting this stage as healthy, review the following question:
-
-> Are route failures caused by congestion, rules, pin access, or earlier physical planning?
-
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
-
-A reviewer should also ask:
-
-```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
-```
-
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
-
-## Additional Note: Routing Is Where Many Earlier Assumptions Become Visible
-
-Routing often exposes mistakes made much earlier. A channel that looked wide enough during floorplan may not support actual pin access. A macro placement may create local detours. A clock rule may consume more routing capacity than expected. A low-level pin shape may reduce access options. Therefore, routing debug should not only repair wires; it should also trace violations back to placement, floorplan, library abstracts, and constraint choices.
+A mature backend routing flow must inspect these three layers separately, because each layer answers a different engineering question.
