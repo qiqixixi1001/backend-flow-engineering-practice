@@ -1,363 +1,753 @@
-# 17. Timing Analysis: Why Every Backend Stage Is Driven by Slack and Path Structure
+# 17. Timing Analysis: Why Every Backend Flow Stage Revolves Around Slack and Paths
 
-> Author: Darren H. Chen  
-> Direction: Backend Flow / Physical Implementation / EDA Tool Engineering / Tcl-Based Flow Engineering  
-> demo: **LAY-BE-17_timing_analysis**  
-> Tags: Backend Flow, Timing Analysis, STA, Slack, Path, MCMM
+Author: Darren H. Chen
 
-Timing analysis provides the time-domain feedback loop for backend implementation; without a timing baseline, physical changes cannot be evaluated correctly.
+Demo: `LAY-BE-17_timing_analysis`
 
-In a real backend project, the visible command line is only the surface. Under it, the tool is continuously converting text files, technology rules, design constraints, and physical edits into a typed implementation database. A robust flow is therefore built around three questions:
+Tags: `Backend Flow` `EDA` `Static Timing Analysis` `Timing Path` `Slack` `MCMM` `Timing Closure` `Physical Implementation`
 
-```text
-1. What design state is this stage supposed to create or refine?
-2. Which objects and relationships must be queried to verify that state?
-3. Which reports prove that the state is safe enough for the next stage?
-```
+---
 
-The answer to those questions is the foundation of backend flow engineering.
+## 1. Timing Analysis Is the Evaluation Backbone of Backend Flow
 
-## 1. Conceptual Model
-
-The important point in this topic is that a backend step is never an isolated command. It is a state transition inside a larger physical implementation system. The input state contains design objects, library models, constraints, and previous physical decisions. The output state must be both usable by the next stage and explainable by reports.
-
-For this article, the most relevant objects are:
-
-- `clock`
-- `path`
-- `startpoint`
-- `endpoint`
-- `arc`
-- `arrival time`
-- `required time`
-- `slack`
-- `scenario`
-- `constraint`
-
-These objects are not just names. They are database entries with type, ownership, geometry, connectivity, timing, and sometimes manufacturing meaning. When a script manipulates them, it is manipulating the implementation state of the chip.
-
-A practical mental model is:
+Backend implementation contains many visible stages:
 
 ```text
-source files + constraints + technology context
-        |
-        v
-backend database objects
-        |
-        v
-stage-specific transformation
-        |
-        v
-reports + updated database + handoff data
+floorplan
+placement
+clock tree synthesis
+routing
+physical optimization
+ECO
+signoff preparation
 ```
 
-This model is simple, but it prevents a common mistake: treating a backend flow as a sequence of text commands. A mature flow treats every stage as a controlled transition from one database state to another.
+At first glance, these stages look very different. Floorplan defines the physical space. Placement assigns cells to legal locations. Clock tree synthesis distributes clocks. Routing creates wires and vias. ECO applies late-stage fixes.
 
-## 2. Backend Architecture View
-
-A EDA tool usually exposes the stage through Tcl or another command interface. However, the real architecture is layered. A command is parsed, resolved against the current database, checked against technology and design rules, executed by an internal engine, and finally reflected in logs, reports, and updated design objects.
-
-For this topic, a useful architecture decomposition is:
-
-- `constraint reader`
-- `library timing model`
-- `net delay model`
-- `timing graph builder`
-- `delay calculator`
-- `path analyzer`
-- `timing report writer`
-
-The flow can be visualized as:
+However, behind these different operations, one question keeps returning:
 
 ```text
-      [constraint reader]
-              |
-              v
-      [library timing model]
-              |
-              v
-      [net delay model]
-              |
-              v
-      [timing graph builder]
-              |
-              v
-      [delay calculator]
-              |
-              v
-      [path analyzer]
-              |
-              v
-      [timing report writer]
+Which timing paths are still violating constraints, why are they violating, and which implementation change can reduce or remove the violation?
 ```
 
-This architecture view matters because many backend issues are not caused by a single bad command. They are caused by a mismatch between layers. For example, a script may request a legal operation, but the database context is incomplete. A file may be syntactically valid, but the objects created from it do not match the assumptions of the next stage. A report may look clean, but only because the relevant object collection was empty.
+This is why timing analysis is not merely a late-stage check. It is the continuous evaluation system of backend implementation.
 
-Therefore, a GitHub demo should not only run a command. It should also show the layer boundaries: configuration, database input, stage execution, report generation, and verification checks.
+A backend tool moves cells because timing paths are too long or congestion is too high. It inserts buffers because transition, capacitance, or path delay is unacceptable. It builds a clock tree because clock latency and skew directly affect setup and hold. It updates parasitics after routing because wire RC changes timing. It runs ECO because remaining violations need localized repair.
 
-## 3. Engineering Methodology
-
-The recommended methodology is to move from feasibility to quality. Feasibility asks whether the required objects, constraints, and database context exist. Quality asks whether the result is good enough. Mixing these two questions is a common source of confusion.
-
-For this stage, the working rules are:
-
-- `build a timing baseline before physical optimization`
-- `analyze setup and hold separately`
-- `separate graph-level trends from path-level debug`
-- `compare timing across scenarios`
-- `record constraint coverage before reading slack`
-
-The general methodology is:
+The common language of these decisions is:
 
 ```text
-Precheck  ->  Stage execution  ->  State query  ->  Report  ->  Comparison  ->  Next-stage gate
+path
+slack
+arrival time
+required time
+setup
+hold
+scenario
 ```
 
-The precheck phase should verify that all required inputs and assumptions exist. The execution phase should be as deterministic as possible. The query phase should inspect the database rather than relying only on log text. The report phase should write stable files that can be compared across runs. The gate phase should decide whether the next stage is allowed to proceed.
+Without timing analysis, backend implementation would be only geometric construction. With timing analysis, geometry becomes measurable against clock constraints and performance requirements.
 
-This is especially important for GitHub-style examples. A demo that only prints a successful run log is weak evidence. A demo that prints object counts, state checks, and report summaries is much stronger.
+---
 
-## 4. Data Model and Object Relationships
+## 2. Timing Analysis Checks Time Consistency, Not Just Frequency
 
-The data model behind this topic can be understood as a graph. Objects are nodes. Connectivity, hierarchy, geometry, timing arcs, rule references, and ownership are edges. The EDA tool does not operate on a flat list; it operates on a structured graph with many views.
+It is common to describe timing analysis as checking whether a chip can run at a target frequency. That description is useful, but incomplete.
 
-A simplified view is:
+A more precise statement is:
 
 ```text
-logical hierarchy ---- owns ---- instances / modules
-        |                         |
-        |                         v
-        |                    pins / ports ---- connect ---- nets
-        |                         |                         |
-        v                         v                         v
-constraints              timing arcs / checks          physical routes
-        |                         |                         |
-        v                         v                         v
-reports                  timing paths                  DRC / PV results
+Timing analysis checks whether data transitions arrive and remain stable within the required time windows under specified clocks, modes, process corners, voltage corners, temperature corners, constraints, and parasitic conditions.
 ```
 
-The most important engineering implication is that every stage must preserve cross-view consistency. A physical change may affect timing. A timing fix may affect routing. A routing fix may affect physical verification. A low-power or hierarchical constraint may affect all of them.
+The central issue is time consistency.
 
-The right way to debug is not to ask only, "Which command failed?" The better question is:
+For a synchronous setup path, the simplified data movement is:
 
 ```text
-Which view of the design became inconsistent with another view?
+launch register
+  -> clock-to-Q delay
+  -> combinational cell delay
+  -> interconnect delay
+  -> capture register setup requirement
 ```
 
-## 5. Demo Design
+For a hold path, the question is different. The data must not change too soon after the capture clock edge.
 
-The paired demo is:
+The same physical implementation therefore has to satisfy two opposite-looking requirements:
+
+```text
+setup: data must not arrive too late
+hold : data must not arrive too early
+```
+
+This is why timing closure is difficult. Many fixes that improve setup timing can make hold timing worse. Many hold fixes add area, capacitance, power, or routing pressure.
+
+---
+
+## 3. The Timing Graph Is the Time-Domain Model of the Design
+
+After design import and link, the EDA tool has a design database containing cells, nets, pins, ports, libraries, constraints, and physical state. Static timing analysis builds a timing graph on top of this database.
+
+A simplified model is:
+
+```text
+Timing Graph = Timing Nodes + Timing Arcs
+```
+
+Typical nodes are:
+
+```text
+ports
+pins
+timing points
+clock points
+register endpoints
+```
+
+Typical arcs are:
+
+```text
+cell delay arcs
+net delay arcs
+setup/hold check arcs
+clock propagation arcs
+constraint arcs
+```
+
+A timing graph can be visualized as follows:
+
+```mermaid
+flowchart LR
+    CLK1[Launch Clock] --> CK1[FF1/CK]
+    CK1 --> Q1[FF1/Q]
+    Q1 --> N1[Net n1]
+    N1 --> A1[U1/A]
+    A1 --> Z1[U1/Z]
+    Z1 --> N2[Net n2]
+    N2 --> A2[U2/A]
+    A2 --> Z2[U2/Z]
+    Z2 --> D2[FF2/D]
+    CLK2[Capture Clock] --> CK2[FF2/CK]
+    CK2 --> D2
+```
+
+Timing analysis propagates values through this graph.
+
+Two propagated values are especially important:
+
+| Concept | Meaning |
+|---|---|
+| Arrival time | When data or clock actually reaches a timing point |
+| Required time | The latest or earliest allowed time for that timing point |
+
+Slack is the difference between what happened and what was required.
+
+For setup:
+
+```text
+setup_slack = required_time - arrival_time
+```
+
+For hold:
+
+```text
+hold_slack = arrival_time - required_time
+```
+
+Negative slack means that the implementation does not satisfy the timing requirement for that path under that scenario.
+
+---
+
+## 4. Why Paths Matter More Than Individual Cells
+
+A timing violation is a path-level phenomenon. A single slow cell does not necessarily cause a violation. A single fast cell does not necessarily create a hold issue. The result depends on the complete path equation.
+
+A timing path can be described as:
+
+```text
+Timing Path =
+    launch clock path
+  + clock-to-Q delay
+  + data cell delay
+  + data net delay
+  + capture clock path
+  + setup/hold requirement
+  + uncertainty
+  + derate / variation
+  + exceptions and mode conditions
+```
+
+This explains why backend changes affect timing in different ways.
+
+| Backend action | Timing component affected |
+|---|---|
+| Move cells closer | Data net delay, capacitance, transition |
+| Resize cells | Cell delay, output slew, input capacitance |
+| Insert buffer | Net delay, transition, load distribution |
+| Clone driver | Fanout load, local net delay |
+| Build clock tree | Clock latency, skew, clock transition |
+| Route nets | Real wire RC, coupling, delay |
+| Insert hold buffer | Minimum data delay |
+| Apply ECO | Logic structure, cell delay, net delay |
+
+This is why a timing report is not just a scorecard. It is a diagnostic map of the implementation.
+
+---
+
+## 5. Slack Is the Feedback Signal of Timing Closure
+
+Backend implementation is an iterative optimization process.
+
+A simplified timing closure loop is:
+
+```mermaid
+flowchart TD
+    A[Implementation State] --> B[Timing Analysis]
+    B --> C[Worst Paths and Slack]
+    C --> D[Violation Classification]
+    D --> E[Physical or Logical Fix]
+    E --> F[Updated Implementation State]
+    F --> B
+```
+
+In this loop, slack is the primary feedback signal.
+
+It tells the tool and the engineer:
+
+```text
+which path group is failing
+which scenario is failing
+how large the violation is
+whether the problem is setup or hold
+whether the design is improving or regressing
+whether a fix is sufficient or harmful
+```
+
+Slack must be interpreted with context. A single worst negative slack value is useful, but it does not describe the whole timing state.
+
+A better timing baseline includes:
+
+```text
+WNS: worst negative slack
+TNS: total negative slack
+NVP: number of violating paths
+violating endpoint count
+path group summary
+scenario summary
+setup/hold split
+unconstrained path count
+transition/capacitance violation count
+```
+
+---
+
+## 6. Setup and Hold Are Different Physical Problems
+
+Setup and hold violations should not be debugged with the same mental model.
+
+### 6.1 Setup Timing
+
+Setup checks whether data arrives before the capture edge plus setup requirement.
+
+Common causes of setup violation include:
+
+```text
+long combinational path
+large net delay
+slow cell delay
+large load capacitance
+poor placement
+bad routing detour
+unfavorable skew
+large uncertainty
+wrong or overly tight constraint
+```
+
+Common setup fixes include:
+
+```text
+cell resizing
+buffer insertion
+driver cloning
+cell movement
+logic restructuring
+critical net routing improvement
+useful skew adjustment
+constraint review
+```
+
+### 6.2 Hold Timing
+
+Hold checks whether data remains stable long enough after the capture edge.
+
+Common causes of hold violation include:
+
+```text
+short data path
+fast cell corner
+unfavorable clock skew
+insufficient minimum delay
+clock tree imbalance
+incorrect mode setup
+```
+
+Common hold fixes include:
+
+```text
+delay buffer insertion
+cell downsizing or delay increase
+small route detour
+clock skew adjustment
+localized ECO
+```
+
+### 6.3 Why the Distinction Matters
+
+Setup fixes often try to speed up the data path. Hold fixes often try to slow down the data path. These objectives can conflict.
+
+For example:
+
+```text
+A setup fix inserts a stronger driver.
+The faster transition improves setup slack.
+The same change may reduce minimum delay and create hold pressure.
+```
+
+Timing closure must therefore track setup and hold separately, by scenario and by path group.
+
+---
+
+## 7. Timing Context Determines Whether a Report Is Trustworthy
+
+A timing report is only as trustworthy as its timing context.
+
+Timing analysis depends on more than the netlist. A complete timing context may include:
+
+```text
+linked design database
+Liberty timing libraries
+operating conditions
+SDC constraints
+clock definitions
+clock uncertainty
+clock latency
+input/output delays
+false paths
+multicycle paths
+case analysis
+mode settings
+parasitic models or extracted parasitics
+OCV/AOCV/POCV derates
+scenario definitions
+```
+
+If any of these are missing or wrong, the report may be misleading.
+
+Examples:
+
+| Missing or wrong context | Possible symptom |
+|---|---|
+| Missing clock | Paths become unconstrained or incorrectly grouped |
+| Wrong top port name | Input/output delay does not bind |
+| Missing case analysis | Impossible functional paths are analyzed |
+| Wrong false path | Real path is ignored or false path is optimized unnecessarily |
+| Missing parasitics | Post-route timing changes unexpectedly |
+| Wrong corner | Setup/hold risk appears in the wrong scenario |
+| Missing generated clock | Clock relationships become incorrect |
+
+This is why a mature timing stage begins with timing setup checks before interpreting slack numbers.
+
+---
+
+## 8. Multi-Scenario Timing: Why One Report Is Not Enough
+
+A real chip does not operate under one condition only. Backend flow usually analyzes multiple combinations of:
+
+```text
+process corner
+voltage
+temperature
+functional mode
+test mode
+power state
+clock mode
+RC corner
+analysis type
+```
+
+This leads to multi-corner multi-mode timing analysis.
+
+A simplified scenario matrix may look like this:
+
+| Scenario | Mode | Corner | Voltage | Temperature | RC | Primary risk |
+|---|---|---|---:|---:|---|---|
+| FUNC_SS_SETUP | Functional | Slow | Low | High | Worst RC | Setup |
+| FUNC_FF_HOLD | Functional | Fast | High | Low | Best RC | Hold |
+| SCAN_SS_SETUP | Scan shift/capture | Slow | Low | High | Worst RC | Scan setup |
+| SCAN_FF_HOLD | Scan shift/capture | Fast | High | Low | Best RC | Scan hold |
+| LOW_POWER_RET | Retention mode | Slow | Low | High | Worst RC | State retention timing |
+
+The same path may pass in one scenario and fail in another. A timing fix must therefore be evaluated across all relevant scenarios.
+
+A backend flow that optimizes only the current worst report can easily create regressions elsewhere.
+
+---
+
+## 9. Graph-Based and Path-Based Analysis
+
+Timing engines often use different analysis strategies at different stages.
+
+### 9.1 Graph-Based Analysis
+
+Graph-based analysis propagates arrival and required times through the timing graph efficiently.
+
+It is suitable for:
+
+```text
+large-scale analysis
+optimization loops
+early and mid-stage timing guidance
+endpoint screening
+path group ranking
+```
+
+Advantages:
+
+```text
+fast
+capacity-friendly
+good for repeated optimization
+```
+
+Limitations:
+
+```text
+may be conservative
+may not fully explain a specific path
+may require path-level review for final debug
+```
+
+### 9.2 Path-Based Analysis
+
+Path-based analysis examines specific paths more precisely.
+
+It is suitable for:
+
+```text
+worst path debug
+late-stage timing confirmation
+signoff-oriented review
+fix prioritization
+```
+
+Advantages:
+
+```text
+more precise path explanation
+better for final diagnosis
+more useful for engineer review
+```
+
+Limitations:
+
+```text
+more expensive
+not ideal for every optimization iteration
+```
+
+A practical methodology is:
+
+```text
+use graph-based analysis for broad convergence;
+use path-based analysis for critical path confirmation and late-stage debug.
+```
+
+---
+
+## 10. Timing Debug Should Decompose the Path
+
+A useful timing debug process does not stop at slack.
+
+For each critical path, it should ask:
+
+```text
+Is the path group correct?
+Are launch and capture clocks correct?
+Is the constraint valid?
+Is it setup or hold?
+Which scenario fails?
+Is cell delay dominant?
+Is net delay dominant?
+Is skew helping or hurting?
+Is uncertainty or derate excessive?
+Is the path affected by high fanout?
+Is there transition or capacitance violation?
+Does the path cross macro, partition, or voltage-domain boundary?
+Is the path intended to be false or multicycle?
+```
+
+A structured path debug table can look like this:
+
+| Field | Meaning |
+|---|---|
+| scenario | Failing mode/corner |
+| path_group | Clock or path group |
+| startpoint | Launch point |
+| endpoint | Capture point |
+| check_type | Setup or hold |
+| slack | Violation or margin |
+| arrival_time | Actual arrival |
+| required_time | Timing requirement |
+| data_cell_delay | Cell delay contribution |
+| data_net_delay | Net delay contribution |
+| launch_clock_latency | Launch clock path timing |
+| capture_clock_latency | Capture clock path timing |
+| skew | Capture minus launch relation |
+| uncertainty | Constraint margin |
+| dominant_factor | Likely root cause category |
+| suggested_fix_class | Resize, move, buffer, reroute, constraint review, etc. |
+
+This transforms timing analysis from report reading into engineering diagnosis.
+
+---
+
+## 11. Timing Analysis Across Backend Stages
+
+Timing analysis appears at many points in backend implementation.
+
+| Stage | Timing role |
+|---|---|
+| After import/link | Check clocks, constraints, unconstrained paths |
+| After floorplan | Estimate macro/IO distance impact |
+| During placement | Guide timing-driven placement |
+| After placement | Establish pre-CTS timing baseline |
+| After CTS | Analyze clock latency, skew, transition, setup/hold |
+| After routing | Use routed parasitics for more realistic timing |
+| During ECO | Verify incremental timing fixes |
+| Before signoff handoff | Confirm final timing status and report completeness |
+
+Timing analysis is therefore not a single stage. It is a repeated measurement and correction loop.
+
+---
+
+## 12. Timing Readiness State Machine
+
+A robust backend flow should not run timing reports blindly. It should pass through readiness states.
+
+```mermaid
+stateDiagram-v2
+    [*] --> DesignLinked
+    DesignLinked --> LibrariesLoaded
+    LibrariesLoaded --> ConstraintsLoaded
+    ConstraintsLoaded --> ClocksChecked
+    ClocksChecked --> ExceptionsChecked
+    ExceptionsChecked --> ScenarioBuilt
+    ScenarioBuilt --> ParasiticReady
+    ParasiticReady --> TimingUpdated
+    TimingUpdated --> ReportsGenerated
+    ReportsGenerated --> BaselineReviewed
+    BaselineReviewed --> [*]
+
+    DesignLinked --> TimingSetupError: missing current design
+    LibrariesLoaded --> TimingSetupError: missing timing library
+    ConstraintsLoaded --> TimingSetupError: invalid SDC
+    ClocksChecked --> TimingSetupError: missing clock
+    ScenarioBuilt --> TimingSetupError: invalid scenario
+```
+
+This state machine is useful because many timing problems are setup problems rather than implementation problems.
+
+For example, a large number of unconstrained endpoints should not be treated as a physical optimization issue. It should first be treated as a timing context issue.
+
+---
+
+## 13. Timing Baseline Before Optimization
+
+Before timing optimization, a flow should establish a timing baseline.
+
+A baseline should answer:
+
+```text
+Are all clocks defined?
+Are generated clocks recognized?
+Are input and output delays bound?
+Are there unconstrained paths?
+Are false paths and multicycle paths intentional?
+What is WNS/TNS/NVP per scenario?
+Which path groups dominate violations?
+Are violations cell-delay dominated or net-delay dominated?
+Are transition and capacitance violations present?
+Which paths should be fixed first?
+```
+
+Without this baseline, optimization can become blind trial and error.
+
+A recommended baseline report set is:
+
+```text
+timing_context_check.rpt
+clock_summary.rpt
+constraint_check.rpt
+unconstrained_paths.rpt
+scenario_summary.rpt
+setup_baseline.rpt
+hold_baseline.rpt
+path_group_summary.rpt
+transition_capacitance_summary.rpt
+worst_path_debug_summary.rpt
+```
+
+---
+
+## 14. Failure Patterns in Timing Analysis
+
+Timing failures are not all the same. Classifying them improves debug efficiency.
+
+| Failure pattern | Symptom | Likely root cause | First action |
+|---|---|---|---|
+| Missing clocks | Many unconstrained endpoints | Clock not defined or not propagated | Check SDC and clock report |
+| Invalid path group | Paths appear under wrong group | Clock or exception issue | Review path grouping |
+| Net-delay dominated setup | Large interconnect delay | Placement or routing issue | Inspect physical distance and congestion |
+| Cell-delay dominated setup | Large logic delay | Cell sizing or logic depth issue | Check resize or restructuring options |
+| Hold dominated by short path | Very small data delay | Minimum delay issue | Insert delay or review skew |
+| Skew-related violation | Clock path dominates slack | CTS or clock constraint issue | Inspect clock latency and skew |
+| Transition violation | Slow slew | Weak driver or high load | Resize/buffer/reduce fanout |
+| Capacitance violation | Load too high | High fanout or long net | Buffer/clone/fanout split |
+| Scenario-only failure | One mode/corner fails | MCMM condition issue | Compare scenario context |
+| Constraint anomaly | Timing looks unrealistic | Wrong exception or clock relation | Review constraints before optimizing |
+
+The goal is not only to report violations, but to classify them into fixable engineering categories.
+
+---
+
+## 15. Methodology: Path-First, Context-Aware Timing Closure
+
+A practical timing methodology can be summarized as:
+
+```text
+1. Build a valid timing context.
+2. Check clocks and constraints before fixing paths.
+3. Separate setup and hold.
+4. Analyze by scenario and path group.
+5. Classify dominant delay contributors.
+6. Fix high-impact path classes first.
+7. Re-run timing after each physical state change.
+8. Track WNS/TNS/NVP trends, not only one worst path.
+9. Avoid fixing invalid or unintended paths.
+10. Preserve reports for comparison and handoff.
+```
+
+This methodology prevents a common mistake: spending time optimizing paths that are caused by incorrect constraints or incomplete scenario setup.
+
+---
+
+## 16. Demo 17: Timing Analysis
+
+The corresponding demo is:
 
 ```text
 LAY-BE-17_timing_analysis
 ```
 
-The demo should be self-contained. It should use a local directory structure, local sample data where possible, local Tcl scripts, local report files, and a local run manifest. It should not depend on files from another demo. This makes the example easy to copy, review, and rerun.
+The purpose of the demo is not to replace a signoff STA flow. The goal is to build a timing-analysis engineering skeleton that can be inspected, repeated, and compared.
 
-A recommended directory structure is:
+A recommended structure is:
 
 ```text
 LAY-BE-17_timing_analysis/
-  README.md
-  config/
-    env.csh
-    design_config.tcl
-  data/
-    README.md
-  scripts/
-    run_demo.csh
-  tcl/
-    run_demo.tcl
-    precheck.tcl
-    report_utils.tcl
-  logs/
-  reports/
-  output/
-  tmp/
+├─ data/
+│  ├─ sample_timing_setup.rpt
+│  ├─ sample_timing_hold.rpt
+│  └─ scenario_config.csv
+├─ scripts/
+│  ├─ run_timing_demo.csh
+│  └─ clean.csh
+├─ tcl/
+│  ├─ 01_check_timing_context.tcl
+│  ├─ 02_report_timing_baseline.tcl
+│  ├─ 03_report_worst_paths.tcl
+│  ├─ 04_classify_timing_paths.tcl
+│  └─ 05_write_timing_debug_summary.tcl
+├─ logs/
+│  ├─ timing_analysis.log
+│  ├─ timing_analysis.cmd.log
+│  └─ timing_analysis.stdout.log
+├─ reports/
+│  ├─ timing_context_check.rpt
+│  ├─ timing_baseline.rpt
+│  ├─ worst_setup_paths.rpt
+│  ├─ worst_hold_paths.rpt
+│  ├─ path_group_summary.rpt
+│  └─ timing_debug_summary.rpt
+└─ README.md
 ```
 
-The demo should produce at least three categories of output:
+The demo should verify:
 
 ```text
-1. A main report describing the stage result.
-2. A check report describing whether expected objects and files exist.
-3. A log summary that separates warnings, errors, and important state messages.
+timing context can be checked;
+setup and hold reports can be separated;
+worst paths can be extracted;
+slack, arrival, and required time can be summarized;
+path groups and scenarios can be reported;
+path diagnosis can be written into a structured report.
 ```
 
-The purpose is not to mimic a full production chip flow. The purpose is to build a minimal, inspectable engineering unit that demonstrates the principle.
+---
 
-## 6. What to Check in Reports
+## 17. Demo Inputs and Outputs
 
-A useful report should be written for humans first and scripts second. It should make the stage decision visible: what was checked, what passed, what failed, and what should be reviewed before continuing.
+### Inputs
 
-For this topic, the report should include:
+| Input | Purpose |
+|---|---|
+| linked design database | Provides timing graph objects |
+| Liberty timing model | Provides cell delay and timing arc data |
+| constraints | Defines clocks, IO delays, exceptions, path groups |
+| scenario configuration | Defines mode/corner context |
+| parasitic or estimated RC data | Provides interconnect delay model |
+| timing report templates | Defines what should be captured |
 
-- `clock definition coverage`
-- `unconstrained endpoint count`
-- `worst negative slack`
-- `total negative slack`
-- `number of violating paths`
-- `top path structure`
+### Outputs
 
-A recommended report skeleton is:
+| Output | Purpose |
+|---|---|
+| `timing_context_check.rpt` | Confirms readiness of timing setup |
+| `timing_baseline.rpt` | Captures WNS/TNS/NVP by scenario |
+| `worst_setup_paths.rpt` | Lists setup-critical paths |
+| `worst_hold_paths.rpt` | Lists hold-critical paths |
+| `path_group_summary.rpt` | Shows violation distribution by group |
+| `timing_debug_summary.rpt` | Classifies dominant root-cause patterns |
+
+---
+
+## 18. Engineering Takeaways
+
+Timing analysis is the central evaluation mechanism of backend implementation.
+
+Its key ideas are:
 
 ```text
-# Stage Report
-Generated: <timestamp>
-Demo: LAY-BE-17_timing_analysis
-
-## Input Summary
-- design files
-- technology/library files
-- constraint files
-- configuration variables
-
-## Object Summary
-- object class
-- count
-- key properties
-- suspicious empty collections
-
-## Stage Result
-- executed operations
-- pass/fail status
-- warnings/errors
-
-## Next-Stage Gate
-- ready: yes/no
-- reason
-- required fixes
+Timing analysis checks time consistency, not just frequency.
+The timing graph is the time-domain model of the design.
+A violation is a path-level problem, not merely a cell-level problem.
+Slack is the feedback signal of timing closure.
+Setup and hold have different physical meanings and fix strategies.
+Timing context must be validated before report interpretation.
+MCMM analysis makes timing a scenario-dependent problem.
+A timing baseline should be established before optimization.
+Path classification turns timing reports into engineering decisions.
 ```
 
-The next-stage gate is important. Backend flow engineering is not only about producing a result; it is about deciding whether that result is safe to consume.
+Backend flow decisions become more explainable when every physical change can be traced back to path and slack impact.
 
-## 7. Common Pitfalls
+---
 
-The most common pitfalls are:
+## 19. Closing Note
 
-- `slack is reviewed without knowing the scenario`
-- `setup fixes break hold paths`
-- `wire delay is underestimated before placement/routing`
-- `constraint gaps are mistaken for timing success`
+Backend implementation is not only about placing cells, building clocks, and routing wires. Each physical action changes the time relationship between launch and capture events.
 
-Most of these problems come from treating the flow as a command recipe rather than a database engineering system. A command recipe may work once. A database-aware flow can be debugged, compared, and transferred.
+To understand backend flow at an engineering level, one must understand how paths are formed, how slack is computed, and how timing reports guide physical changes.
 
-A useful debugging sequence is:
-
-```text
-1. Check whether the expected input files exist.
-2. Check whether the expected database objects were created.
-3. Check whether object counts match the assumption.
-4. Check whether the stage changed the expected objects.
-5. Check whether the reports describe the change clearly.
-6. Check whether the next stage can consume the result.
-```
-
-This sequence is slower than guessing, but it produces durable engineering knowledge.
-
-## 8. GitHub Documentation Style
-
-For GitHub, the article should be connected with executable artifacts. A good repository page should not be only a theory note and should not be only a script dump. It should connect explanation, demo input, demo output, and engineering interpretation.
-
-A recommended GitHub layout is:
-
-```text
-docs/articles/17_timing_analysis.md
-examples/LAY-BE-17_timing_analysis/
-examples/LAY-BE-17_timing_analysis/README.md
-examples/LAY-BE-17_timing_analysis/reports/
-```
-
-The article explains why the stage matters. The example directory shows how the stage is represented as files and reports. The report directory shows what the user should inspect after a run.
-
-This separation is useful because backend work has two audiences:
-
-```text
-- readers who want to understand the method;
-- engineers who want to reproduce the run.
-```
-
-## 9. Engineering Takeaways
-
-The central takeaway is:
-
-> Timing analysis provides the time-domain feedback loop for backend implementation; without a timing baseline, physical changes cannot be evaluated correctly.
-
-A backend flow becomes reliable when each stage has a clear state model, clear input assumptions, clear object queries, clear reports, and clear next-stage gates. The more complex the design becomes, the less effective ad-hoc scripting becomes. What scales is not command memorization; what scales is a structured engineering method.
-
-For this topic, the practical rules are:
-
-```text
-- understand the database objects before editing them;
-- check feasibility before judging quality;
-- write reports that explain the stage state;
-- compare runs through stable output files;
-- treat the demo as a small but complete engineering unit.
-```
-
-A EDA tool can execute commands, but engineering judgment comes from how we model the state, inspect the result, and preserve the reasoning path from input to output.
-
-## Architecture Deep Dive: What the Stage Really Owns
-
-This stage owns **STA as the feedback system of backend implementation**. In a production backend flow, this ownership must be stated explicitly because many failures look similar at the log level but come from different architectural layers. A missing object, an empty collection, a mismatched unit, and an unsupported option can all appear as a short tool message. The engineering question is not only "what failed", but "which layer owned the assumption that failed".
-
-The main architectural objects for this stage are:
-
-```text
-timing graph, clocks, endpoints, arcs, constraints, delay models, slack, path groups
-```
-
-These objects should not be treated as incidental details. They form the interface contract of the stage. When a stage is executed, it consumes some of these objects, creates or refines others, and produces evidence that the next stage can trust. The more explicitly this contract is written, the easier it becomes to debug the flow when a later stage fails.
-
-A useful architecture rule is to separate **representation**, **interpretation**, and **evidence**:
-
-```text
-representation  ->  interpretation  ->  evidence
-files / params      database state       reports / logs / checkpoints
-```
-
-Representation is what the engineer writes or receives: scripts, libraries, constraints, layout views, or configuration files. Interpretation is the state created inside the EDA tool after those inputs are processed. Evidence is the external proof that interpretation happened as expected. Many backend problems occur because engineers check representation but never check interpretation. For example, a file can exist but still fail to create the required database objects; a constraint can be sourced but still not apply to the intended object set; a physical edit can be legal locally but harmful to timing or routing globally.
-
-The architecture of a reliable flow therefore does not stop at command execution. It must also include state queries, report generation, and review gates. In this series, every demo is designed around that idea: a stage is only complete when it leaves behind enough evidence to explain what changed.
-
-## Methodology Playbook
-
-For this topic, the recommended methodology is:
-
-```text
-analyze paths by cause; separate constraint issues from implementation issues; track timing after every major stage
-```
-
-This methodology can be applied at three levels.
-
-At the **script level**, every important operation should be surrounded by clear input checks and output checks. The script should not depend on unstated shell state, invisible tool settings, or manual interpretation of long logs. It should print what it is about to do, execute the stage, query the resulting state, and write a compact report.
-
-At the **database level**, the flow should avoid confusing names with objects. A name is only a textual handle. The real question is whether the EDA tool has created the intended cell, net, pin, port, layer, row, path, domain, or physical shape object. This distinction is especially important in hierarchical designs, ECO work, low-power implementation, and PV handoff, where names can be rewritten, flattened, uniquified, scoped, or transformed across formats.
-
-At the **review level**, the team should define a small number of gates. A gate is not just a milestone. It is a decision point backed by reports. A useful gate says: these inputs were used, this state was created, these checks passed, these warnings remain, and this is why the next stage is safe. Without review gates, a backend flow easily becomes a long chain of commands where the first real failure is discovered too late.
-
-A strong playbook also records negative evidence. Empty reports, missing object counts, unsupported commands, ignored constraints, and unresolved references should not be hidden. They are often the first sign that the flow is running under different assumptions from the engineer's mental model.
-
-## Design Review Questions
-
-Before accepting this stage as healthy, review the following question:
-
-> Can timing reports explain what physical change is needed next?
-
-This question is intentionally practical. It forces the stage to be judged by evidence rather than by confidence. In backend implementation, confidence without evidence is fragile. Evidence without interpretation is noise. The target is a flow where every major stage produces evidence that is compact enough to review and precise enough to drive the next engineering action.
-
-A reviewer should also ask:
-
-```text
-1. What state did this stage promise to create?
-2. Which input assumptions were required?
-3. Which report proves that the state exists?
-4. Which warnings are acceptable, and which must block the next step?
-5. What downstream stage will fail first if this stage is wrong?
-```
-
-These five questions turn a demo into an engineering method. They also make the article useful beyond the small example, because the same reasoning can be reused in a real backend project with commercial libraries, large netlists, multiple corners, hierarchical blocks, and signoff handoff requirements.
-
-## Additional Note: Timing Reports Are Not Only Pass/Fail Reports
-
-A timing report is a structured explanation of path behavior. It shows launch and capture context, delay accumulation, constraint interpretation, uncertainty, derate effects, and slack. In a backend flow, the value of timing analysis is not only to declare pass or fail. Its value is to explain where physical implementation should change: placement locality, buffer sizing, load reduction, clock latency, route detour, or constraint clarification.
+In that sense, timing analysis is not a side report. It is the control feedback system of timing closure.
